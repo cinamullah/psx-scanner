@@ -26,18 +26,16 @@ CONFIG = {
 }
 
 KSE100_SYMBOLS = [
-    "ABL","ABOT","AGP","AICL","AKBL","APL","ATLH","ATRL",
-    "BAFL","BAHL","BNWM","BOP","BWCL","CHCC","CNERGY","COLG",
-    "CPHL","DCR","DGKC","DHPL","EFERT","ENGRO","FABL","FATIMA",
-    "FCCL","FFC","FFL","FHAM","GADT","GALG","GHGL","GHNIG",
-    "GLAXO","HALEON","HBL","HCAR","HGFA","HINOON","HMB","HUBC",
-    "HUMNL","IBFL","ILP","INIL","ISL","JDWS","JVDC","KAPCO",
-    "KEL","KOHCK","KTML","LCIL","LOTCHEM","LUCK","MARI","MCB",
-    "MEBL","MEHT","MLCF","MTL","MUREB","NATF","OGDC","PAEL",
-    "PAKTP","PABCP","PGLC","PPC","PPL","PTC","PYPL","RAFHAN",
-    "RIL","SCBPL","SEARL","SFERT","SHEL","SNGP","SYS","THALL",
-    "TRG","UBL","UNITY","YWMIL","EFUG","EFUL","EPQL","BOK",
-    "JGICL","HPL","ATIL","NESTLE","ZIL","FCEPL","UPFL","ALIFE","WAFI","CENI"
+    "CNERGY", "BOP", "PRL", "WTL", "KOSM", 
+    "KEL", "UNITY", "NCPL", "CSIL", "PAEL", 
+    "SSGC", "TRG", "ATRL", "MLCF", "SYS", 
+    "NPL", "CLOV", "YOUW", "TELE", "PTC", 
+    "NBP", "LUCK", "DGKC", "SNGP", "PSO", 
+    "NRL", "OGDC", "POL", "PPL", "NETSOL", 
+    "TGL", "HCAR", "EFERT", "ABL", "UBL", 
+    "BAHL", "MEBL", "FFC", "ENGROH", "MARI", 
+    "ATLH", "CHCC", "COLG", "ABOT", "BAFL", 
+    "AIRLINK", "HUBC", "MTL", "PIBTL", "ILP"
 ]
 
 SECTORS = {
