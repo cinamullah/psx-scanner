@@ -15,7 +15,7 @@ from typing import Dict, List, Tuple, Optional
 CONFIG = {
     "START_TIME": "09:17",
     "END_TIME": "15:30",
-    "REFRESH_RATE": 30,
+    "REFRESH_RATE": 150,
     
     # Professional thresholds
     "MIN_LIQUIDITY": 50000,  # Minimum daily volume
