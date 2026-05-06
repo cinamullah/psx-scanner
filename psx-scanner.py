@@ -1,60 +1,58 @@
 import streamlit as st
 import pandas as pd
-import numpy as np
 import requests
 from datetime import datetime, timedelta
 import pytz
 from requests.adapters import HTTPAdapter
+import html
 from urllib3.util.retry import Retry
 from typing import Dict, List, Tuple, Optional
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# INSTITUTIONAL-GRADE CONFIGURATION
+# CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
 CONFIG = {
     "START_TIME": "09:17",
     "END_TIME": "15:30",
-    "REFRESH_RATE": 150,
-    
-    # Professional thresholds
-    "MIN_LIQUIDITY": 50000,  # Minimum daily volume
-    "ATR_STOP_MULTIPLIER": 1.5,  # Stop loss = price - (1.5 * ATR)
-    "VWAP_STD_LEVELS": [1.0, 2.0],  # Standard deviation bands
-    "ORB_MINUTES": 30,  # Opening Range Breakout window
-    "MARKET_BREADTH_THRESHOLD": -0.5,  # KSE100 sentiment filter
+    "REFRESH_RATE": 120,
+    "MIN_LIQUIDITY": 50000,
+    "ATR_STOP_MULTIPLIER": 1.5,
+    "MARKET_BREADTH_THRESHOLD": 0.0,
 }
 
 KSE100_SYMBOLS = [
-    "CNERGY", "BOP", "PRL", "WTL", "KOSM", 
-    "KEL", "UNITY", "NCPL", "CSIL", "PAEL", 
-    "SSGC", "TRG", "ATRL", "MLCF", "SYS", 
-    "NPL", "CLOV", "YOUW", "TELE", "PTC", 
-    "NBP", "LUCK", "DGKC", "SNGP", "PSO", 
-    "NRL", "OGDC", "POL", "PPL", "NETSOL", 
-    "TGL", "HCAR", "EFERT", "ABL", "UBL", 
-    "BAHL", "MEBL", "FFC", "ENGROH", "MARI", 
-    "ATLH", "CHCC", "COLG", "ABOT", "BAFL", 
-    "AIRLINK", "HUBC", "MTL", "PIBTL", "ILP"
+    "CNERGY", "BOP", "PRL", "WTL", "KOSM",
+    "KEL", "UNITY", "NCPL", "CSIL", "PAEL",
+    "SSGC", "TRG", "ATRL", "MLCF", "SYS",
+    "NPL", "CLOV", "YOUW", "TELE", "PTC",
+    "NBP", "LUCK", "DGKC", "SNGP", "PSO",
+    "NRL", "OGDC", "POL", "PPL", "NETSOL",
+    "TGL", "HCAR", "EFERT", "ABL", "UBL",
+    "BAHL", "MEBL", "FFC", "ENGROH", "MARI",
+    "ATLH", "CHCC", "COLG", "ABOT", "BAFL",
+    "AIRLINK", "HUBC", "MTL", "PIBTL", "ILP", "FNEL"
 ]
 
 SECTORS = {
-    "Banks": {"symbols": ["MEBL","MCB","UBL","HBL","ABL","AKBL","BAFL","BAHL","BOP","FABL","SCBPL"], "quality": 9},
-    "E&P": {"symbols": ["OGDC","PPL","MARI"], "quality": 8},
-    "Fertilizer": {"symbols": ["FFC","ENGRO","EFERT","FATIMA","SFERT"], "quality": 9},
-    "Cement": {"symbols": ["LUCK","DGKC","MLCF","BWCL","CHCC","FCCL","KOHCK"], "quality": 7},
-    "Tech": {"symbols": ["SYS","TRG","PTC"], "quality": 6},
-    "Power": {"symbols": ["HUBC","KAPCO","KEL"], "quality": 7},
-    "Oil & Gas": {"symbols": ["APL","SHEL","SNGP"], "quality": 8},
-    "Auto": {"symbols": ["ATLH","HCAR","MTL","THALL"], "quality": 6},
-    "Food": {"symbols": ["FFL","UNITY","MUREB","RAFHAN"], "quality": 8},
-    "Pharma": {"symbols": ["ABOT","AGP","SEARL","GLAXO","HALEON"], "quality": 9},
+    "Banks": {"symbols": ["MEBL","UBL","ABL","BAFL","BAHL","BOP","NBP"], "quality": 9},
+    "E&P": {"symbols": ["OGDC","PPL","MARI","POL"], "quality": 8},
+    "Fertilizer": {"symbols": ["FFC","ENGROH","EFERT"], "quality": 9},
+    "Cement": {"symbols": ["LUCK","DGKC","MLCF","CHCC"], "quality": 7},
+    "Tech": {"symbols": ["SYS","TRG","PTC","NETSOL","AIRLINK"], "quality": 6},
+    "Power": {"symbols": ["HUBC","KEL","NCPL","PAEL","NPL"], "quality": 7},
+    "Oil & Gas": {"symbols": ["SNGP","SSGC","PSO","NRL","ATRL","PRL","CNERGY"], "quality": 8},
+    "Auto": {"symbols": ["ATLH","HCAR","MTL"], "quality": 6},
+    "Food": {"symbols": ["UNITY","COLG"], "quality": 8},
+    "Pharma": {"symbols": ["ABOT"], "quality": 9},
+    "Textile": {"symbols": ["KOSM","CLOV","ILP"], "quality": 5},
+    "Misc": {"symbols": ["YOUW","CSIL","PIBTL","TGL","TELE"], "quality": 6},
 }
 
 SYMBOL_TO_SECTOR = {sym: sec for sec, data in SECTORS.items() for sym in data["symbols"]}
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# TIME & MARKET UTILITIES
+# UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
 
 def pkt_now():
@@ -67,16 +65,17 @@ def is_market_open():
     t = now.strftime("%H:%M")
     return CONFIG["START_TIME"] <= t <= CONFIG["END_TIME"]
 
-def session_minutes_elapsed() -> int:
-    """Calculate minutes since market open"""
-    now = pkt_now()
-    start_h, start_m = map(int, CONFIG["START_TIME"].split(":"))
-    start_dt = now.replace(hour=start_h, minute=start_m, second=0)
-    elapsed = (now - start_dt).total_seconds() / 60
-    return max(0, int(elapsed))
+def _safe(val, default=0):
+    return val if val is not None else default
+
+def calculate_atr_stop(price: float, atr: float, multiplier: float = 1.5) -> float:
+    return round(price - (multiplier * atr), 2)
+
+def check_ema_fan(ema5: float, ema10: float, ema20: float, ema50: float) -> bool:
+    return ema5 > ema10 > ema20 > ema50
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING WITH EXTENDED INDICATORS
+# DATA FETCHING
 # ═══════════════════════════════════════════════════════════════════════════════
 
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
@@ -88,11 +87,12 @@ TV_COLUMNS = [
     "EMA10", "ADX", "ATR", "Stoch.K"
 ]
 
-def get_tv_session():
+@st.cache_resource
+def get_session():
     s = requests.Session()
     retries = Retry(total=3, backoff_factor=1, status_forcelist=[500, 502, 503, 504])
     s.mount('https://', HTTPAdapter(max_retries=retries))
-    s.headers.update({"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+    s.headers.update({"User-Agent": "Mozilla/5.0"})
     return s
 
 @st.cache_data(ttl=25, show_spinner=False)
@@ -101,11 +101,10 @@ def fetch_market_data():
         "filter": [{"left": "name", "operation": "in_range", "right": KSE100_SYMBOLS}],
         "markets": ["pakistan"],
         "columns": TV_COLUMNS,
-        "range": [0, 300],
+        "range": [0, 400],
     }
     try:
-        s = get_tv_session()
-        r = s.post(TV_URL, json=payload, timeout=15)
+        r = get_session().post(TV_URL, json=payload, timeout=15)
         r.raise_for_status()
         return r.json().get("data", [])
     except Exception as e:
@@ -113,443 +112,270 @@ def fetch_market_data():
         return []
 
 @st.cache_data(ttl=30, show_spinner=False)
-def fetch_market_breadth():
-    """Calculate KSE100 market sentiment"""
+def fetch_breadth():
+    symbols = list(set(KSE100_SYMBOLS + ["KSE100", "PKS100"]))
     payload = {
-        "filter": [{"left": "name", "operation": "in_range", "right": KSE100_SYMBOLS}],
+        "filter": [{"left": "name", "operation": "in_range", "right": symbols}],
         "markets": ["pakistan"],
-        "columns": ["change"],
-        "range": [0, 150],
+        "columns": ["name", "change", "close", "high", "low", "volume"],
+        "range": [0, 500],
     }
     try:
-        s = get_tv_session()
-        r = s.post(TV_URL, json=payload, timeout=10)
+        r = get_session().post(TV_URL, json=payload, timeout=10)
         data = r.json().get("data", [])
-        changes = [item["d"][0] for item in data if item["d"][0] is not None]
-        
-        if not changes:
-            return 0.0, False
-        
-        avg_change = sum(changes) / len(changes)
-        advancing = sum(1 for c in changes if c > 0)
-        declining = sum(1 for c in changes if c < 0)
-        
-        # Market is bullish if average change > threshold AND more advancers
-        is_bullish = avg_change > CONFIG["MARKET_BREADTH_THRESHOLD"] and advancing > declining
-        
-        return avg_change, is_bullish
+
+        constituent_changes = []
+        kse_info = {"close": 0.0, "change": 0.0, "high": 0.0, "low": 0.0, "volume": 0}
+
+        for item in data:
+            ticker_full = item.get("s", "").upper()
+            d = item.get("d", [])
+            if len(d) < 6: continue
+
+            name = _safe(d[0], "")
+            change = _safe(d[1])
+            close = _safe(d[2])
+
+            if "KSE100" in ticker_full or "PKS100" in ticker_full or name == "KSE100":
+                kse_info = {
+                    "close": close,
+                    "change": change,
+                    "high": _safe(d[3]),
+                    "low": _safe(d[4]),
+                    "volume": _safe(d[5])
+                }
+            if name in KSE100_SYMBOLS or ticker_full.split(":")[-1] in KSE100_SYMBOLS:
+                constituent_changes.append(change)
+
+        if not constituent_changes:
+            return 0.0, False, 0, 0, kse_info
+
+        avg = sum(constituent_changes) / len(constituent_changes)
+        adv = sum(1 for c in constituent_changes if c > 0)
+        dec = sum(1 for c in constituent_changes if c < 0)
+        bullish = avg > CONFIG["MARKET_BREADTH_THRESHOLD"] and adv > dec
+
+        return avg, bullish, adv, dec, kse_info
+    except Exception:
+        return 0.0, False, 0, 0, {"close": 0.0, "change": 0.0, "high": 0.0, "low": 0.0, "volume": 0}
+
+@st.cache_data(ttl=60, show_spinner=False)
+def fetch_sarmaaya_index():
+    """Fetch KSE100 overview from Sarmaaya API"""
+    try:
+        r = requests.get("https://beta-restapi.sarmaaya.pk/api/indices/overview/KSE100", timeout=10)
+        if r.status_code == 200:
+            return r.json().get("response", {})
     except:
-        return 0.0, True  # Default to neutral/bullish on error
-
-def _safe(val, default=0):
-    """Safe value extraction with None handling"""
-    return val if val is not None else default
-
-# ═══════════════════════════════════════════════════════════════════════════════
-# PROFESSIONAL TECHNICAL INDICATORS
-# ═══════════════════════════════════════════════════════════════════════════════
-
-def calculate_rsi_slope(rsi_current: float, rsi_prev: float) -> str:
-    """Determine RSI momentum direction"""
-    if rsi_prev == 0:
-        return "neutral"
-    diff = rsi_current - rsi_prev
-    if diff > 2:
-        return "rising"
-    elif diff < -2:
-        return "falling"
-    return "neutral"
-
-def detect_rsi_divergence(price_current: float, price_prev: float, 
-                         rsi_current: float, rsi_prev: float) -> Optional[str]:
-    """Detect bearish/bullish divergence"""
-    if price_prev == 0 or rsi_prev == 0:
         return None
-    
-    price_higher = price_current > price_prev
-    rsi_higher = rsi_current > rsi_prev
-    
-    # Bearish divergence: Price makes higher high, RSI makes lower high
-    if price_higher and not rsi_higher and rsi_current > 60:
-        return "bearish"
-    
-    # Bullish divergence: Price makes lower low, RSI makes higher low
-    if not price_higher and rsi_higher and rsi_current < 40:
-        return "bullish"
-    
-    return None
-
-def check_ema_fan_alignment(ema5: float, ema10: float, ema20: float, ema50: float) -> bool:
-    """Check if EMAs are properly fanned out (trending)"""
-    return ema5 > ema10 > ema20 > ema50
-
-def calculate_atr_stop(price: float, atr: float, multiplier: float = 1.5) -> float:
-    """Calculate volatility-adjusted stop loss"""
-    return round(price - (multiplier * atr), 2)
-
-def is_opening_range_breakout(price: float, high_orb: float, minutes_elapsed: int) -> bool:
-    """Check if price broke above opening range high"""
-    if minutes_elapsed < CONFIG["ORB_MINUTES"]:
-        return False
-    return price > high_orb * 1.002  # 0.2% above ORB high
-
-def calculate_vwap_distance(price: float, vwap: float) -> float:
-    """Calculate % distance from VWAP"""
-    if vwap == 0:
-        return 0
-    return ((price - vwap) / vwap) * 100
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# INSTITUTIONAL-GRADE SIGNAL LOGIC
+# SIGNAL LOGIC
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def analyze_intraday(price: float, change: float, rv: float, rsi: float, 
-                     macd: float, macd_sig: float, bb_low: float, bb_high: float,
-                     ema5: float, ema10: float, vwap: float, adx: float, 
-                     stoch: float, vol: float, avg_vol_30: float, atr: float,
-                     high_1w: float, open_price: float, cci: float,
-                     market_bullish: bool, minutes_elapsed: int) -> Tuple[int, List[str], Optional[float], Optional[float]]:
-    """
-    INTRADAY SCALPING - Professional confluence model
-    
-    Key improvements:
-    - ATR-based stops (volatility-adjusted)
-    - Opening Range Breakout detection
-    - VWAP distance analysis
-    - Market breadth filter
-    - Volume profile analysis
-    """
+def analyze_intraday(price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish):
     score = 0
     reasons = []
-    exit_price = None
-    stop_loss = None
-    
-    # Market breadth filter - reduce score if market is bearish
-    breadth_penalty = 0 if market_bullish else -2
-    
-    # Volume analysis (institutional footprint)
-    vol_ratio_30 = vol / avg_vol_30 if avg_vol_30 > 0 else 0
-    if vol_ratio_30 > 3.0:  # Whale activity
+
+    penalty = 0 if bullish else -2
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+
+    # Volume surge
+    if vol_ratio > 3.0:
         score += 4
-        reasons.append(f"🐋 Whale Vol {vol_ratio_30:.1f}x")
-    elif vol_ratio_30 > 2.0:
+        reasons.append(f"🐋 {vol_ratio:.1f}x Vol")
+    elif vol_ratio > 2.0:
         score += 3
-        reasons.append(f"Vol Surge {vol_ratio_30:.1f}x")
+        reasons.append(f"{vol_ratio:.1f}x Vol")
     elif rv > 1.5:
         score += 2
-    
-    # Opening Range Breakout (ORB)
-    if is_opening_range_breakout(price, high_1w, minutes_elapsed):
-        score += 3
-        reasons.append("ORB Breakout")
-    
-    # VWAP position analysis
-    vwap_dist = calculate_vwap_distance(price, vwap)
-    if price > vwap and 0 < vwap_dist < 1.5:  # Near VWAP, above
+
+    # VWAP edge
+    if price > vwap:
+        dist = ((price - vwap) / vwap) * 100
+        if dist < 1.5:
+            score += 2
+            reasons.append("VWAP Edge")
+        elif dist > 3:
+            score -= 1
+
+    # EMA alignment
+    if price > ema10:
         score += 2
-        reasons.append("VWAP Edge")
-    elif price > vwap and vwap_dist > 3:  # Too far from VWAP
-        score -= 1
-        reasons.append("VWAP Extended")
-    
-    # EMA alignment (price above fast EMAs)
-    if price > ema5 and price > ema10:
-        score += 2
-        reasons.append("EMA Aligned")
-    
-    # ADX trend strength
+        reasons.append("EMA+")
+
+    # ADX strength
     if adx > 30:
         score += 3
-        reasons.append(f"Strong Trend ADX{adx:.0f}")
+        reasons.append(f"ADX{adx:.0f}")
     elif adx > 25:
         score += 2
-        reasons.append(f"ADX {adx:.0f}")
-    
-    # RSI momentum (not overbought, healthy)
+
+    # RSI
     if 50 < rsi < 65:
         score += 2
-        reasons.append(f"RSI {rsi:.0f}")
-    elif 45 < rsi <= 50:
-        score += 1
-    elif rsi >= 75:  # Extreme overbought
+        reasons.append(f"RSI{rsi:.0f}")
+    elif rsi >= 75:
         score -= 2
-        reasons.append("RSI Extreme")
-    
-    # MACD bullish momentum
+        reasons.append("Overbought")
+
+    # MACD
     if macd > macd_sig and macd > 0:
         score += 2
         reasons.append("MACD+")
-    
-    # Stochastic in momentum zone
+
+    # Stochastic
     if 30 < stoch < 80:
         score += 1
-    
-    # CCI confirmation
-    if cci > 100:  # Strong uptrend
-        score += 1
-    
-    # Apply market breadth penalty
-    score += breadth_penalty
-    
-    # Calculate targets with ATR-based stop
-    if score >= 8:  # Elite intraday setup
-        stop_loss = calculate_atr_stop(price, atr, CONFIG["ATR_STOP_MULTIPLIER"])
-        
-        # Dynamic target based on volatility
-        if atr > 0:
-            target_multiple = 2.5 if rsi < 60 else 1.8  # Adjust for RSI
-            exit_price = round(price + (target_multiple * atr), 2)
-        else:
-            exit_price = round(price * 1.025, 2)
-        
-        # Ensure positive risk-reward
-        denom = price - stop_loss
-        if denom <= 0:
-            stop_loss = round(price * 0.985, 2)
-    
-    return score, reasons, exit_price, stop_loss
 
+    score += penalty
 
-def analyze_swing(price: float, change: float, rv: float, rsi: float,
-                  macd: float, macd_sig: float, ema5: float, ema10: float, 
-                  ema20: float, ema50: float, change1w: float, low1m: float,
-                  adx: float, atr: float, perf1m: float, perf1w: float,
-                  high1m: float, vol: float, avg_vol_30: float,
-                  market_bullish: bool) -> Tuple[int, List[str], Optional[float], Optional[float]]:
-    """
-    SWING TRADING - Multi-timeframe confluence
-    
-    Key improvements:
-    - EMA fan alignment
-    - Position in monthly range analysis
-    - Multi-timeframe performance
-    - Volume confirmation
-    """
+    stop = round(price - (0.5 * atr), 2) if atr > 0 else round(price * 0.99, 2)
+    target = round(price + (0.8 * atr), 2) if atr > 0 else round(price * 1.018, 2)
+
+    if price - stop <= 0:
+        stop = round(price * 0.985, 2)
+
+    return score, reasons, target, stop
+
+def analyze_swing(price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish):
     score = 0
     reasons = []
-    exit_price = None
-    stop_loss = None
-    
-    # Market breadth impact (less critical for swing)
-    breadth_penalty = 0 if market_bullish else -1
-    
-    # EMA fan alignment (professional trend confirmation)
-    if check_ema_fan_alignment(ema5, ema10, ema20, ema50):
+
+    penalty = 0 if bullish else -1
+    ema5 = ema10 * 1.01
+
+    # EMA fan
+    if check_ema_fan(ema5, ema10, ema20, ema50):
         score += 4
         reasons.append("EMA Fan ✓")
     elif price > ema20 and price > ema50:
         score += 2
-        reasons.append("Above EMA20/50")
-    elif price > ema20:
-        score += 1
-    
-    # ADX trend strength
+        reasons.append("EMA20/50+")
+
+    # ADX
     if adx > 25:
         score += 3
-        reasons.append(f"Trending ADX{adx:.0f}")
+        reasons.append(f"ADX{adx:.0f}")
     elif adx > 20:
         score += 2
-    
-    # Position in monthly range (value analysis)
+
+    # Range position
     if low1m > 0 and high1m > 0:
-        range_position = (price - low1m) / (high1m - low1m)
-        
-        if 0.2 < range_position < 0.5:  # Lower half, not at bottom
+        pos = (price - low1m) / (high1m - low1m)
+        if 0.2 < pos < 0.5:
             score += 3
-            reasons.append(f"Value Zone")
-        elif 0.5 < range_position < 0.7:
-            score += 2
-        elif range_position > 0.85:  # Too extended
+            reasons.append("Value Zone")
+        elif pos > 0.85:
             score -= 2
-            reasons.append("Extended Range")
-    
-    # Distance from monthly low (not overextended)
-    dist_from_low = (price / low1m - 1) * 100 if low1m > 0 else 0
-    if 8 < dist_from_low < 25:
-        score += 2
-        reasons.append(f"+{dist_from_low:.0f}% from low")
-    elif dist_from_low > 40:
-        score -= 2
-    
-    # Volume confirmation
-    vol_ratio = vol / avg_vol_30 if avg_vol_30 > 0 else 0
+
+    # Volume
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if vol_ratio > 1.5:
         score += 2
-        reasons.append(f"RV {vol_ratio:.1f}x")
+        reasons.append(f"{vol_ratio:.1f}x RV")
     elif rv > 1.2:
         score += 1
-    
-    # RSI healthy range (not overbought)
+
+    # RSI
     if 45 < rsi < 60:
         score += 3
-        reasons.append(f"RSI {rsi:.0f}")
-    elif 40 < rsi <= 45:
-        score += 2
+        reasons.append(f"RSI{rsi:.0f}")
     elif rsi > 70:
         score -= 2
-        reasons.append("Overbought")
-    
-    # Multi-timeframe momentum
-    if perf1w > 2:
-        score += 1
-        reasons.append(f"1W +{perf1w:.1f}%")
-    if perf1m > 5:
-        score += 1
-        reasons.append(f"1M +{perf1m:.1f}%")
-    
+
     # Weekly momentum
     if change1w > 3:
         score += 1
-    
-    # MACD confirmation
+        reasons.append(f"1W+{change1w:.1f}%")
+
+    # MACD
     if macd > macd_sig:
         score += 1
-    
-    # Apply breadth penalty
-    score += breadth_penalty
-    
-    # Calculate swing targets with ATR
-    if score >= 9:  # Strong swing setup
-        stop_loss = calculate_atr_stop(price, atr, 2.0)  # Wider stop for swing
-        
-        # Target based on monthly range or ATR
-        if atr > 0:
-            exit_price = round(price + (4.5 * atr), 2)  # 4.5 ATR target
-        else:
-            exit_price = round(price * 1.15, 2)  # 15% fallback
-        
-        # Ensure valid stop
-        denom = price - stop_loss
-        if denom <= 0:
-            stop_loss = round(price * 0.93, 2)  # 7% fallback stop
-    
-    return score, reasons, exit_price, stop_loss
 
+    score += penalty
 
-def analyze_longterm(price: float, rsi: float, ema20: float, ema50: float,
-                     change1w: float, low1m: float, high1m: float,
-                     perf1m: float, perf3m: float, sector: str,
-                     vol: float, avg_vol_30: float) -> Tuple[int, List[str], Optional[float], Optional[float]]:
-    """
-    LONG-TERM INVESTMENT - Quality + Value convergence
-    
-    Key improvements:
-    - Sector quality scoring
-    - Double bottom detection
-    - Multi-month performance
-    - Margin of safety analysis
-    """
+    stop = round(price - (1.2 * atr), 2) if atr > 0 else round(price * 0.96, 2)
+    target = round(price + (2.5 * atr), 2) if atr > 0 else round(price * 1.075, 2)
+
+    if price - stop <= 0:
+        stop = round(price * 0.93, 2)
+
+    return score, reasons, target, stop
+
+def analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol):
     score = 0
     reasons = []
-    exit_price = None
-    stop_loss = None
-    
-    # Sector quality (fundamental overlay)
-    sector_data = SECTORS.get(sector, {"quality": 5})
-    quality = sector_data["quality"]
-    
+
+    # Sector quality
+    quality = SECTORS.get(sector, {"quality": 5})["quality"]
     if quality >= 9:
         score += 3
-        reasons.append(f"{sector} (Premium)")
+        reasons.append(f"{sector}")
     elif quality >= 7:
         score += 2
-        reasons.append(f"{sector}")
-    elif quality >= 6:
-        score += 1
-    
-    # Double bottom / value zone detection
+
+    # Value zone
     if low1m > 0 and high1m > 0:
-        dist_from_low = (price / low1m - 1) * 100
-        
-        # Margin of safety: within 5% of monthly low
-        if 1 < dist_from_low < 5 and rsi > 30:  # Not catching falling knife
+        dist = (price / low1m - 1) * 100
+        if 1 < dist < 5 and rsi > 30:
             score += 4
-            reasons.append("Double Bottom Zone")
-        elif dist_from_low < 15:
+            reasons.append("Double Bottom")
+        elif dist < 15:
             score += 3
             reasons.append("Value Zone")
-        elif dist_from_low < 30:
-            score += 1
-        
-        # Position in range
-        range_position = (price - low1m) / (high1m - low1m)
-        if range_position < 0.35:
+
+        pos = (price - low1m) / (high1m - low1m)
+        if pos < 0.35:
             score += 2
             reasons.append("Lower 1/3")
-    
-    # RSI analysis (oversold to neutral)
-    if 30 < rsi < 45:  # Sweet spot
+
+    # RSI
+    if 30 < rsi < 45:
         score += 3
-        reasons.append(f"RSI {rsi:.0f}")
-    elif 25 < rsi <= 30:  # Oversold reversal
-        score += 2
+        reasons.append(f"RSI{rsi:.0f}")
     elif rsi < 50:
         score += 1
-    elif rsi > 65:
-        score -= 1
-    
-    # Long-term trend (EMA50 alignment)
+
+    # EMA50
     if price > ema50:
         score += 3
-        reasons.append("Above EMA50")
-    elif price > ema50 * 0.95:  # Near EMA50
-        score += 1
-    
-    # Multi-period performance
-    if perf3m > -10 and perf1m > -8:  # Not in severe decline
-        score += 2
-    
-    if change1w > -5:  # Recent stability
-        score += 1
-    
-    # Volume (ensure liquidity)
-    vol_ratio = vol / avg_vol_30 if avg_vol_30 > 0 else 0
-    if vol_ratio > 0.8:  # Decent liquidity
-        score += 1
-    
-    # Calculate long-term targets
-    if score >= 8:  # Quality investment setup
-        stop_loss = round(price * 0.85, 2)  # 15% stop (longer hold)
-        
-        # Conservative 35% target for quality plays
-        exit_price = round(price * 1.35, 2)
-        
-        # If near 52W low, target is higher
-        if low1m > 0:
-            dist = (price / low1m - 1) * 100
-            if dist < 8:
-                exit_price = round(price * 1.50, 2)  # 50% target for deep value
-    
-    return score, reasons, exit_price, stop_loss
+        reasons.append("EMA50+")
 
+    # Weekly stability
+    if change1w > -5:
+        score += 1
 
-def process_signals(raw_data, market_bullish: bool):
-    """Process market data into three strategy lists with professional logic"""
+    # Liquidity
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+    if vol_ratio > 0.8:
+        score += 1
+
+    stop = round(price * 0.90, 2)
+    target = round(price * 1.25, 2)
+
+    if low1m > 0 and (price / low1m - 1) * 100 < 8:
+        target = round(price * 1.50, 2)
+
+    return score, reasons, target, stop
+
+def process_signals(raw_data, bullish):
     if not raw_data:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    
-    intraday_rows = []
-    swing_rows = []
-    longterm_rows = []
-    
-    minutes_elapsed = session_minutes_elapsed()
-    
-    # Session state for RSI history (simple in-memory tracking)
-    if 'rsi_history' not in st.session_state:
-        st.session_state.rsi_history = {}
-    
+
+    intra, swing, long = [], [], []
+
     for item in raw_data:
         d = item["d"]
         if len(d) < 21 or d[0] is None:
             continue
-        
-        # Parse core indicators
+
         sym = d[0]
         price = _safe(d[1])
         change = _safe(d[2])
         vol = _safe(d[3])
         rv = _safe(d[4])
-        avg_vol_10 = _safe(d[5])
+        avg_vol = _safe(d[5])
         rsi = _safe(d[6])
         macd = _safe(d[7])
         macd_sig = _safe(d[8])
@@ -565,363 +391,259 @@ def process_signals(raw_data, market_bullish: bool):
         adx = _safe(d[18])
         atr = _safe(d[19])
         stoch = _safe(d[20])
-        
-        # Calculate derived metrics
-        avg_vol_30 = avg_vol_10  # Use 10-day as proxy for 30-day
-        perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0  # Calculate from range
-        perf1w = change1w  # Weekly change = weekly performance
-        perf3m = perf1m * 2  # Rough estimate: 3M ≈ 2x 1M
-        high1w = high1m * 0.95  # Estimate weekly high from monthly
-        low1w = low1m * 1.05  # Estimate weekly low from monthly
-        ema5 = ema10 * 1.01  # Estimate EMA5 slightly above EMA10
-        cci = (price - ema20) / ema20 * 100 if ema20 > 0 else 0  # CCI proxy
-        
-        # Additional calculated fields
-        open_price = price * (1 - change/100) if change != 0 else price
-        bbpower = 1 if price > bb_high else -1 if price < bb_low else 0
-        
+
         sector = SYMBOL_TO_SECTOR.get(sym, "Other")
-        
-        # Liquidity filter
+
         if vol < CONFIG["MIN_LIQUIDITY"]:
             continue
-        
-        # Track RSI for divergence detection
-        prev_rsi = st.session_state.rsi_history.get(sym, rsi)
-        st.session_state.rsi_history[sym] = rsi
-        
-        # ──────────────────────────────────────
-        # INTRADAY ANALYSIS
-        # ──────────────────────────────────────
-        intra_score, intra_reasons, intra_exit, intra_stop = analyze_intraday(
-            price, change, rv, rsi, macd, macd_sig, bb_low, bb_high,
-            ema5, ema10, vwap, adx, stoch, vol, avg_vol_30, atr,
-            high1w, open_price, cci, market_bullish, minutes_elapsed
-        )
-        
-        if intra_score >= 8:  # Professional-grade setup
-            denom = price - intra_stop if intra_stop else 1
-            rr_ratio = (intra_exit - price) / denom if denom > 0 else 0
-            
-            intraday_rows.append({
-                "Symbol": sym,
-                "Sector": sector,
-                "Price": round(price, 2),
-                "Chg%": round(change, 2),
-                "RV": round(rv, 2),
-                "RSI": round(rsi, 1),
-                "Score": intra_score,
-                "Setup": " · ".join(intra_reasons[:4]),
-                "Target": intra_exit,
-                "Stop": intra_stop,
-                "R:R": f"1:{rr_ratio:.1f}" if rr_ratio > 0 else "—",
-            })
-        
-        # ──────────────────────────────────────
-        # SWING ANALYSIS
-        # ──────────────────────────────────────
-        swing_score, swing_reasons, swing_exit, swing_stop = analyze_swing(
-            price, change, rv, rsi, macd, macd_sig, ema5, ema10, ema20, ema50,
-            change1w, low1m, adx, atr, perf1m, perf1w, high1m, vol, avg_vol_30,
-            market_bullish
-        )
-        
-        if swing_score >= 9:  # Elite swing setup
-            denom = price - swing_stop if swing_stop else 1
-            rr_ratio = (swing_exit - price) / denom if denom > 0 else 0
-            
-            swing_rows.append({
-                "Symbol": sym,
-                "Sector": sector,
-                "Price": round(price, 2),
-                "Chg%": round(change, 2),
-                "1W%": round(change1w, 2),
-                "RSI": round(rsi, 1),
-                "Score": swing_score,
-                "Setup": " · ".join(swing_reasons[:4]),
-                "Target": swing_exit,
-                "Stop": swing_stop,
-                "R:R": f"1:{rr_ratio:.1f}" if rr_ratio > 0 else "—",
-            })
-        
-        # ──────────────────────────────────────
-        # LONG-TERM ANALYSIS
-        # ──────────────────────────────────────
-        lt_score, lt_reasons, lt_exit, lt_stop = analyze_longterm(
-            price, rsi, ema20, ema50, change1w, low1m, high1m,
-            perf1m, perf3m, sector, vol, avg_vol_30
-        )
-        
-        if lt_score >= 8:  # Investment-grade setup
-            denom = price - lt_stop if lt_stop else 1
-            rr_ratio = (lt_exit - price) / denom if denom > 0 else 0
-            
-            longterm_rows.append({
-                "Symbol": sym,
-                "Sector": sector,
-                "Price": round(price, 2),
-                "1W%": round(change1w, 2),
-                "1M%": round(perf1m, 2),
-                "RSI": round(rsi, 1),
-                "Score": lt_score,
-                "Setup": " · ".join(lt_reasons[:4]),
-                "Target": lt_exit,
-                "Stop": lt_stop,
-                "R:R": f"1:{rr_ratio:.1f}" if rr_ratio > 0 else "—",
-            })
-    
-    # Convert to DataFrames and sort by score
-    df_intraday = pd.DataFrame(intraday_rows).sort_values("Score", ascending=False) if intraday_rows else pd.DataFrame()
-    df_swing = pd.DataFrame(swing_rows).sort_values("Score", ascending=False) if swing_rows else pd.DataFrame()
-    df_longterm = pd.DataFrame(longterm_rows).sort_values("Score", ascending=False) if longterm_rows else pd.DataFrame()
-    
-    return df_intraday, df_swing, df_longterm
 
+        # INTRADAY
+        score, reasons, target, stop = analyze_intraday(
+            price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish
+        )
 
-def get_position_status(symbol: str, entry_price: float, raw_data) -> Optional[Dict]:
-    """Enhanced position analysis with professional exit signals"""
-    stock_data = None
+        if score >= 8:
+            denom = price - stop
+            rr = (target - price) / denom if denom > 0 else 0
+
+            intra.append({
+                "Symbol": sym, "Sector": sector, "Price": round(price, 2),
+                "Chg%": round(change, 2), "RV": round(rv, 2), "RSI": round(rsi, 1),
+                "Score": score, "Setup": " · ".join(reasons[:3]),
+                "Target": target, "Stop": stop,
+                "R:R": f"1:{rr:.1f}" if rr > 0 else "—"
+            })
+
+        # SWING
+        score, reasons, target, stop = analyze_swing(
+            price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish
+        )
+
+        if score >= 9:
+            denom = price - stop
+            rr = (target - price) / denom if denom > 0 else 0
+
+            swing.append({
+                "Symbol": sym, "Sector": sector, "Price": round(price, 2),
+                "Chg%": round(change, 2), "1W%": round(change1w, 2), "RSI": round(rsi, 1),
+                "Score": score, "Setup": " · ".join(reasons[:3]),
+                "Target": target, "Stop": stop,
+                "R:R": f"1:{rr:.1f}" if rr > 0 else "—"
+            })
+
+        # LONG-TERM
+        perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0
+        score, reasons, target, stop = analyze_longterm(
+            price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol
+        )
+
+        if score >= 8:
+            denom = price - stop
+            rr = (target - price) / denom if denom > 0 else 0
+
+            long.append({
+                "Symbol": sym, "Sector": sector, "Price": round(price, 2),
+                "1W%": round(change1w, 2), "1M%": round(perf1m, 2), "RSI": round(rsi, 1),
+                "Score": score, "Setup": " · ".join(reasons[:3]),
+                "Target": target, "Stop": stop,
+                "R:R": f"1:{rr:.1f}" if rr > 0 else "—"
+            })
+
+    df_intra = pd.DataFrame(intra).sort_values("Score", ascending=False) if intra else pd.DataFrame()
+    df_swing = pd.DataFrame(swing).sort_values("Score", ascending=False) if swing else pd.DataFrame()
+    df_long = pd.DataFrame(long).sort_values("Score", ascending=False) if long else pd.DataFrame()
+
+    return df_intra, df_swing, df_long
+
+def get_position_status(symbol, entry, raw_data):
     for item in raw_data:
         if item["d"][0] == symbol:
-            stock_data = item["d"]
+            d = item["d"]
             break
-    
-    if not stock_data:
+    else:
         return None
-    
-    # Parse current data
-    curr_price = _safe(stock_data[1])
-    change = _safe(stock_data[2])
-    rv = _safe(stock_data[4])
-    rsi = _safe(stock_data[6])
-    macd = _safe(stock_data[7])
-    macd_sig = _safe(stock_data[8])
-    bb_high = _safe(stock_data[10])
-    ema20 = _safe(stock_data[11])
-    ema10 = _safe(stock_data[17])
-    adx = _safe(stock_data[18])
-    atr = _safe(stock_data[19])
-    
-    # Calculate P&L
-    pnl_pct = ((curr_price - entry_price) / entry_price) * 100
-    pnl_amount = curr_price - entry_price
-    
-    # Professional exit signals
-    exit_signals = []
-    exit_action = "🟢 HOLD"
-    confidence = "Medium"
-    
-    # Take profit signals
+
+    curr = _safe(d[1])
+    rv = _safe(d[4])
+    rsi = _safe(d[6])
+    macd = _safe(d[7])
+    macd_sig = _safe(d[8])
+    ema20 = _safe(d[11])
+    ema10 = _safe(d[17])
+    adx = _safe(d[18])
+
+    pnl_pct = ((curr - entry) / entry) * 100
+    pnl_amt = curr - entry
+
+    signals = []
+    action = "🟢 HOLD"
+    conf = "Medium"
+
     if pnl_pct > 12:
-        exit_signals.append("🎯 Excellent profit - book 75%")
-        exit_action = "🟡 SCALE OUT"
-        confidence = "High"
+        signals.append("🎯 Excellent profit - book 75%")
+        action = "🟡 SCALE OUT"
+        conf = "High"
     elif pnl_pct > 8:
-        exit_signals.append("💰 Strong profit - consider booking 50%")
-        exit_action = "🟡 PARTIAL EXIT"
-        confidence = "High"
+        signals.append("💰 Strong profit - book 50%")
+        action = "🟡 PARTIAL EXIT"
+        conf = "High"
     elif pnl_pct > 5 and rsi > 70:
-        exit_signals.append("⚠️ Profit + overbought - lock gains")
-        exit_action = "🟡 PARTIAL EXIT"
-    
-    # Trend breakdown signals
-    if curr_price < ema20 and curr_price < ema10:
-        exit_signals.append("❌ Broke EMA10 & EMA20 - trend dead")
-        exit_action = "🔴 EXIT"
-        confidence = "High"
-    elif curr_price < ema20 * 0.98 and pnl_pct < 2:
-        exit_signals.append("⚠️ Below EMA20 - weakness")
+        signals.append("⚠️ Profit + overbought")
+        action = "🟡 PARTIAL EXIT"
+
+    if curr < ema20 and curr < ema10:
+        signals.append("❌ Broke EMAs - trend dead")
+        action = "🔴 EXIT"
+        conf = "High"
+    elif curr < ema20 * 0.98 and pnl_pct < 2:
+        signals.append("⚠️ Below EMA20")
         if pnl_pct < 0:
-            exit_action = "🔴 EXIT"
-    
-    # Momentum breakdown
+            action = "🔴 EXIT"
+
     if macd < macd_sig and adx < 20 and pnl_pct > 3:
-        exit_signals.append("📉 MACD bear + ADX weak - lock profits")
-        exit_action = "🟡 PARTIAL EXIT"
-    
-    # Volume + RSI exhaustion
+        signals.append("📉 MACD bear + weak ADX")
+        action = "🟡 PARTIAL EXIT"
+
     if rsi > 75 and rv < 0.8:
-        exit_signals.append("🚨 RSI extreme + volume dying")
-        exit_action = "🔴 EXIT"
-        confidence = "High"
-    
-    # Stop loss breach
+        signals.append("🚨 RSI extreme + volume fade")
+        action = "🔴 EXIT"
+        conf = "High"
+
     if pnl_pct < -8:
-        exit_signals.append("🛑 STOP LOSS - cut immediately")
-        exit_action = "🔴 EXIT NOW"
-        confidence = "Critical"
+        signals.append("🛑 STOP LOSS - cut now")
+        action = "🔴 EXIT NOW"
+        conf = "Critical"
     elif pnl_pct < -5 and adx < 18:
-        exit_signals.append("⚠️ Loss + no trend - exit")
-        exit_action = "🔴 EXIT"
-    
-    # Positive signals
-    if not exit_signals or (pnl_pct > 0 and curr_price > ema20):
+        signals.append("⚠️ Loss + no trend")
+        action = "🔴 EXIT"
+
+    if not signals or (pnl_pct > 0 and curr > ema20):
         if adx > 25 and rsi < 70:
-            exit_signals.append("✅ Strong trend - trailing stop recommended")
-            confidence = "Good"
+            signals.append("✅ Strong trend - hold")
+            conf = "Good"
         elif pnl_pct > 0:
-            exit_signals.append("✅ Profit intact - monitor closely")
+            signals.append("✅ Profit intact - monitor")
         else:
-            exit_signals.append("⏳ Developing - hold position")
-    
+            signals.append("⏳ Developing position")
+
     return {
-        "symbol": symbol,
-        "entry": entry_price,
-        "current": curr_price,
-        "pnl_pct": pnl_pct,
-        "pnl_amount": pnl_amount,
-        "rsi": rsi,
-        "rv": rv,
-        "adx": adx,
-        "action": exit_action,
-        "signals": exit_signals,
-        "confidence": confidence,
+        "symbol": symbol, "entry": entry, "current": curr,
+        "pnl_pct": pnl_pct, "pnl_amount": pnl_amt,
+        "rsi": rsi, "rv": rv, "adx": adx,
+        "action": action, "signals": signals, "confidence": conf
     }
 
-
 # ═══════════════════════════════════════════════════════════════════════════════
-# STREAMLIT UI - PROFESSIONAL INTERFACE
+# STREAMLIT UI
 # ═══════════════════════════════════════════════════════════════════════════════
 
-st.set_page_config(
-    page_title="PSX Pro Scanner",
-    layout="wide",
-    initial_sidebar_state="collapsed",
-)
+st.set_page_config(page_title="PSX Pro Scanner", layout="wide", initial_sidebar_state="collapsed")
 
-# Session state
 if 'positions' not in st.session_state:
     st.session_state.positions = []
 
 # ──────────────────────────────────────────────
-# PROFESSIONAL STYLES
+# STYLES
 # ──────────────────────────────────────────────
 
 st.markdown("""
 <style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;600;700&display=swap');
 
-* {
-    font-family: 'Inter', -apple-system, sans-serif;
-}
+* { font-family: 'Inter', -apple-system, sans-serif; }
+html, body, [class*="css"] { background: #0a0e1a !important; color: #e2e8f0 !important; }
+code, pre, .mono { font-family: 'JetBrains Mono', monospace !important; }
 
-html, body, [class*="css"] {
-    background: #0a0e1a !important;
-    color: #e2e8f0 !important;
-}
-
-code, pre, .mono {
-    font-family: 'JetBrains Mono', 'Courier New', monospace !important;
-}
-
-/* Header */
 .pro-header {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    border: 1px solid rgba(148, 163, 184, 0.1);
-    border-radius: 16px;
-    padding: 2rem;
+    background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
+    backdrop-filter: blur(10px);
+    border: 1px solid rgba(255, 255, 255, 0.05);
+    border-radius: 20px;
+    padding: 1.5rem 2rem;
     margin-bottom: 2rem;
-    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+    box-shadow: 0 20px 50px rgba(0, 0, 0, 0.5);
 }
 
 .pro-title {
-    font-size: 2.2rem;
+    font-size: 2.4rem;
     font-weight: 800;
     letter-spacing: -0.03em;
     background: linear-gradient(135deg, #00ff88 0%, #00ccff 50%, #8b5cf6 100%);
     -webkit-background-clip: text;
     -webkit-text-fill-color: transparent;
     margin-bottom: 0.75rem;
-    line-height: 1.2;
 }
 
 .pro-subtitle {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.9rem;
+    font-size: 0.85rem;
     color: #64748b;
     letter-spacing: 0.05em;
     display: flex;
     align-items: center;
-    gap: 1.5rem;
+    gap: 1rem;
     flex-wrap: wrap;
 }
 
-/* Market breadth indicator */
-.breadth-badge {
-    background: rgba(16, 185, 129, 0.1);
-    border: 1px solid rgba(16, 185, 129, 0.3);
-    color: #10b981;
-    padding: 0.4rem 1rem;
+.badge {
+    background: #0f172a;
+    border: 1px solid #1e293b;
+    padding: 0.4rem 0.9rem;
     border-radius: 8px;
-    font-size: 0.75rem;
+    font-size: 0.7rem;
     font-weight: 700;
     letter-spacing: 0.05em;
 }
 
-.breadth-badge.bearish {
-    background: rgba(239, 68, 68, 0.1);
-    border-color: rgba(239, 68, 68, 0.3);
-    color: #ef4444;
+.market-open { border-color: #10b981; color: #10b981; background: rgba(16, 185, 129, 0.05); }
+.market-closed { border-color: #ef4444; color: #ef4444; background: rgba(239, 68, 68, 0.05); }
+.breadth-bull { border-color: #10b981; color: #10b981; background: rgba(16, 185, 129, 0.1); }
+.breadth-bear { border-color: #ef4444; color: #ef4444; background: rgba(239, 68, 68, 0.1); }
+
+.sector-wrap {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.4rem;
+    margin-bottom: 1rem;
 }
 
-/* Strategy cards */
+.sector-mini-card {
+    background: rgba(30, 41, 59, 0.5);
+    border: 1px solid rgba(255, 255, 255, 0.08);
+    border-radius: 6px;
+    padding: 5px 10px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    transition: all 0.2s;
+}
+.sector-mini-card:hover { background: rgba(51, 65, 85, 0.6); border-color: rgba(255, 255, 255, 0.2); }
+.sector-mini-name { font-size: 0.75rem; font-weight: 500; color: #94a3b8; }
+.sector-mini-val { font-family: 'JetBrains Mono', monospace; font-size: 0.8rem; font-weight: 700; }
+
 .strategy-card {
-    background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
-    border: 1px solid rgba(51, 65, 85, 0.5);
+    background: linear-gradient(160deg, rgba(30, 41, 59, 0.5) 0%, rgba(15, 23, 42, 0.7) 100%);
+    border: 1px solid rgba(255, 255, 255, 0.05);
     border-radius: 14px;
     padding: 1.5rem;
     margin-bottom: 2rem;
-    box-shadow: 0 8px 32px rgba(0, 0, 0, 0.2);
-    transition: transform 0.2s, box-shadow 0.2s;
-}
-
-.strategy-card:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 12px 48px rgba(0, 0, 0, 0.3);
 }
 
 .strategy-header {
-    font-size: 1.25rem;
+    font-size: 1.3rem;
     font-weight: 700;
     margin-bottom: 0.5rem;
     display: flex;
     align-items: center;
-    gap: 0.75rem;
-    letter-spacing: -0.02em;
+    gap: 0.5rem;
 }
 
 .strategy-desc {
     font-size: 0.85rem;
     color: #94a3b8;
     margin-bottom: 1.25rem;
-    line-height: 1.6;
 }
 
-.status-badge {
-    background: #0f172a;
-    border: 1px solid #1e293b;
-    padding: 0.5rem 1.1rem;
-    border-radius: 8px;
-    font-size: 0.75rem;
-    font-family: 'JetBrains Mono', monospace;
-    font-weight: 700;
-    letter-spacing: 0.05em;
-    text-transform: uppercase;
-}
-
-.market-open {
-    border-color: #10b981;
-    color: #10b981;
-    background: rgba(16, 185, 129, 0.05);
-}
-
-.market-closed {
-    border-color: #ef4444;
-    color: #ef4444;
-    background: rgba(239, 68, 68, 0.05);
-}
-
-/* Position tracker */
 .position-card {
     background: linear-gradient(135deg, #1e293b 0%, #0f172a 100%);
     border: 1px solid #334155;
@@ -931,68 +653,36 @@ code, pre, .mono {
     transition: all 0.2s;
 }
 
-.position-card:hover {
-    border-color: #475569;
-    box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2);
-}
+.position-card:hover { border-color: #475569; box-shadow: 0 4px 20px rgba(0, 0, 0, 0.2); }
+.pnl-pos { color: #10b981 !important; font-weight: 700; }
+.pnl-neg { color: #ef4444 !important; font-weight: 700; }
 
-.pnl-positive {
-    color: #10b981 !important;
-    font-weight: 700;
-}
-
-.pnl-negative {
-    color: #ef4444 !important;
-    font-weight: 700;
-}
-
-.confidence-badge {
+.conf-badge {
     display: inline-block;
     padding: 0.25rem 0.75rem;
     border-radius: 6px;
-    font-size: 0.7rem;
+    font-size: 0.65rem;
     font-weight: 700;
     letter-spacing: 0.05em;
-    text-transform: uppercase;
 }
 
-.confidence-high {
-    background: rgba(16, 185, 129, 0.15);
-    color: #10b981;
-    border: 1px solid rgba(16, 185, 129, 0.3);
-}
+.conf-high { background: rgba(16, 185, 129, 0.15); color: #10b981; border: 1px solid rgba(16, 185, 129, 0.3); }
+.conf-critical { background: rgba(239, 68, 68, 0.15); color: #ef4444; border: 1px solid rgba(239, 68, 68, 0.3); }
 
-.confidence-critical {
-    background: rgba(239, 68, 68, 0.15);
-    color: #ef4444;
-    border: 1px solid rgba(239, 68, 68, 0.3);
-}
-
-/* Tables */
-[data-testid="stDataFrame"] {
-    background: transparent !important;
-}
-
+[data-testid="stDataFrame"] { background: transparent !important; }
 thead tr th {
     background: rgba(30, 41, 59, 0.6) !important;
     color: #94a3b8 !important;
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.75rem !important;
+    font-size: 0.7rem !important;
     font-weight: 700 !important;
     letter-spacing: 0.08em !important;
     text-transform: uppercase;
-    padding: 1rem 0.75rem !important;
 }
 
-tbody tr {
-    border-bottom: 1px solid rgba(30, 41, 59, 0.3) !important;
-}
+tbody tr { border-bottom: 1px solid rgba(30, 41, 59, 0.3) !important; }
+tbody tr:hover { background: rgba(30, 41, 59, 0.2) !important; }
 
-tbody tr:hover {
-    background: rgba(30, 41, 59, 0.2) !important;
-}
-
-/* Buttons */
 .stButton>button {
     background: linear-gradient(135deg, #3b82f6 0%, #2563eb 100%);
     color: white;
@@ -1002,23 +692,11 @@ tbody tr:hover {
     font-weight: 700;
     font-size: 0.9rem;
     transition: all 0.2s;
-    letter-spacing: 0.02em;
 }
 
-.stButton>button:hover {
-    transform: translateY(-2px);
-    box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4);
-}
+.stButton>button:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(59, 130, 246, 0.4); }
 
-/* Dividers */
-hr {
-    border-color: rgba(30, 41, 59, 0.5) !important;
-    margin: 2.5rem 0 !important;
-}
-
-/* Input fields */
-.stTextInput>div>div>input,
-.stNumberInput>div>div>input {
+.stTextInput>div>div>input, .stNumberInput>div>div>input {
     background: rgba(15, 23, 42, 0.6) !important;
     border: 1px solid rgba(51, 65, 85, 0.5) !important;
     border-radius: 8px !important;
@@ -1026,76 +704,244 @@ hr {
     font-family: 'JetBrains Mono', monospace !important;
 }
 
-.stTextInput>div>div>input:focus,
-.stNumberInput>div>div>input:focus {
+.stTextInput>div>div>input:focus, .stNumberInput>div>div>input:focus {
     border-color: #3b82f6 !important;
     box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.2) !important;
 }
+
+hr { border-color: rgba(30, 41, 59, 0.5) !important; margin: 2rem 0 !important; }
 </style>
 """, unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
-# HEADER WITH MARKET BREADTH
+# HEADER
 # ──────────────────────────────────────────────
 
 is_open = is_market_open()
 now_str = pkt_now().strftime("%H:%M PKT · %a %d %b %Y")
 
-# Fetch market breadth
-avg_change, market_bullish = fetch_market_breadth()
-breadth_class = "breadth-badge" if market_bullish else "breadth-badge bearish"
-breadth_text = f"BULLISH {avg_change:+.2f}%" if market_bullish else f"BEARISH {avg_change:+.2f}%"
+avg_chg, bullish, adv, dec, kse_info = fetch_breadth()
+breadth_class = "breadth-bull" if bullish else "breadth-bear"
+breadth_text = f"BULLISH {avg_chg:+.2f}%" if bullish else f"BEARISH {avg_chg:+.2f}%"
 status_class = "market-open" if is_open else "market-closed"
 status_text = "● LIVE" if is_open else "● CLOSED"
 
-st.markdown(f"""
-<div class="pro-header">
-    <div class="pro-title">⚡ PSX Professional Scanner</div>
-    <div class="pro-subtitle">
-        <span class="status-badge {status_class}">{status_text}</span>
-        <span class="{breadth_class}">MARKET {breadth_text}</span>
-        <span style="color: #64748b;">{now_str}</span>
-    </div>
+st.markdown(f'''<div class="pro-header">
+<div class="pro-title">⚡ PSX Professional Scanner</div>
+<div class="pro-subtitle">
+<span>Institutional Grade Equity Intelligence</span>
+<span style="color: #64748b; margin-left: auto; font-family: 'JetBrains Mono', monospace;">{now_str}</span>
 </div>
-""", unsafe_allow_html=True)
+</div>''', unsafe_allow_html=True)
 
 # ──────────────────────────────────────────────
-# POSITION TRACKER
+# KSE100 DETAILED SUMMARY (SARMAAYA DATA)
 # ──────────────────────────────────────────────
 
+sarmaaya_data = fetch_sarmaaya_index()
+
+# Use Sarmaaya as primary, fallback to TV breadth fetch if Sarmaaya is down
+idx_close = sarmaaya_data.get('close', kse_info['close']) if sarmaaya_data else kse_info['close']
+idx_change_abs = sarmaaya_data.get('change', 0) if sarmaaya_data else 0
+idx_pct = sarmaaya_data.get('changePercent', kse_info['change']) if sarmaaya_data else kse_info['change']
+idx_high = sarmaaya_data.get('high', kse_info['high']) if sarmaaya_data else kse_info['high']
+idx_low = sarmaaya_data.get('low', kse_info['low']) if sarmaaya_data else kse_info['low']
+idx_vol = sarmaaya_data.get('volume', kse_info['volume']) if sarmaaya_data else kse_info['volume']
+vol_cr = idx_vol / 10_000_000
+
+idx_color = "#10b981" if idx_pct >= 0 else "#ef4444"
+
+st.markdown(f'''<div style="background: rgba(30, 41, 59, 0.4); border: 1px solid rgba(255,255,255,0.05); border-radius: 12px; padding: 1.25rem; margin-bottom: 2rem;">
+<div style="display: flex; gap: 10px; margin-bottom: 1.25rem; align-items: center; flex-wrap: wrap;">
+<span class="badge {status_class}">{status_text}</span>
+<span class="badge {breadth_class}">{breadth_text}</span>
+<div style="display: flex; gap: 15px; margin-left: 10px; padding-left: 15px; border-left: 1px solid rgba(255,255,255,0.1);">
+<span style="color: #10b981; font-weight: 800; font-family: monospace; font-size: 0.85rem;">▲ {adv}</span>
+<span style="color: #ef4444; font-weight: 800; font-family: monospace; font-size: 0.85rem;">▼ {dec}</span>
+</div>
+</div>
+<div style="display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 20px;">
+<div>
+<div style="font-size: 0.85rem; color: #94a3b8; font-weight: 600; text-transform: uppercase; margin-bottom: 4px;">KSE100 Index</div>
+<div style="font-size: 2.2rem; font-weight: 800; color: #fff; line-height: 1;">{idx_close:,.2f}</div>
+<div style="font-size: 1.1rem; font-weight: 700; color: {idx_color}; margin-top: 5px;">
+{f"{idx_change_abs:+,.2f} " if idx_change_abs != 0 else ""}({idx_pct:+.2f}%)
+</div>
+</div>
+<div style="display: flex; gap: 30px; border-left: 1px solid rgba(255,255,255,0.1); padding-left: 30px;">
+<div><div style="color: #64748b; font-size: 0.7rem; text-transform: uppercase; margin-bottom: 2px;">High</div><div style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono';">{idx_high:,.0f}</div></div>
+<div><div style="color: #64748b; font-size: 0.7rem; text-transform: uppercase; margin-bottom: 2px;">Low</div><div style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono';">{idx_low:,.0f}</div></div>
+<div><div style="color: #64748b; font-size: 0.7rem; text-transform: uppercase; margin-bottom: 2px;">Volume</div><div style="font-weight: 700; color: #e2e8f0; font-family: 'JetBrains Mono';">{vol_cr:.2f} Cr</div></div>
+</div>
+</div>
+</div>''', unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────
+# SCAN
+# ──────────────────────────────────────────────
+
+scan = is_open
+
+if not is_open:
+    if st.button("🔍 Manual Scan", use_container_width=True):
+        scan = True
+
+if scan:
+    with st.spinner("Scanning market..."):
+        raw = fetch_market_data()
+
+        # Sector performance
+        sec_perf = {}
+        for item in raw:
+            sym = item["d"][0]
+            chg = _safe(item["d"][2])
+            sec = SYMBOL_TO_SECTOR.get(sym)
+            if sec:
+                if sec not in sec_perf: sec_perf[sec] = []
+                sec_perf[sec].append(chg)
+
+        st.markdown("##### 🏗️ Sector Performance")
+        sector_names = list(SECTORS.keys())
+        sector_html = '<div class="sector-wrap">'
+        for sec in sector_names:
+            changes = sec_perf.get(sec, [0])
+            avg_chg = sum(changes) / len(changes)
+            color = "#10b981" if avg_chg >= 0 else "#ef4444"
+            safe_name = html.escape(sec)
+            sector_html += f"""
+            <div class="sector-mini-card">
+                <span class="sector-mini-name">{safe_name}</span>
+                <span class="sector-mini-val" style="color: {color};">{avg_chg:+.1f}%</span>
+            </div>"""
+        sector_html += "</div>"
+        st.markdown(sector_html, unsafe_allow_html=True)
+        st.write("")
+
+        df_intra, df_swing, df_long = process_signals(raw, bullish)
+
+    # INTRADAY
+    st.markdown("""
+    <div class="strategy-card">
+        <div class="strategy-header">
+            ⚡ <span style="color: #fbbf24;">INTRADAY</span> SCALPS
+        </div>
+        <div class="strategy-desc">
+            Same-day exits · ATR stops · VWAP edge · Score ≥8/15
+        </div>
+    """, unsafe_allow_html=True)
+
+    if df_intra.empty:
+        st.info("🔍 No elite setups")
+    else:
+        st.dataframe(
+            df_intra,
+            column_config={
+                "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+                "RV": st.column_config.NumberColumn("RV", format="%.1fx"),
+                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
+                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # SWING
+    st.markdown("""
+    <div class="strategy-card">
+        <div class="strategy-header">
+            🚀 <span style="color: #3b82f6;">SWING</span> TRADES
+        </div>
+        <div class="strategy-desc">
+            3-7 day holds · EMA fan · Value zones · Score ≥9/18
+        </div>
+    """, unsafe_allow_html=True)
+
+    if df_swing.empty:
+        st.info("🔍 No elite setups")
+    else:
+        st.dataframe(
+            df_swing,
+            column_config={
+                "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+                "1W%": st.column_config.NumberColumn("1W%", format="%.2f%%"),
+                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
+                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+    # LONG-TERM
+    st.markdown("""
+    <div class="strategy-card">
+        <div class="strategy-header">
+            💎 <span style="color: #10b981;">LONG-TERM</span> INVESTMENTS
+        </div>
+        <div class="strategy-desc">
+            Multi-week · Quality sectors · Double bottoms · Score ≥8/16
+        </div>
+    """, unsafe_allow_html=True)
+
+    if df_long.empty:
+        st.info("🔍 No elite setups")
+    else:
+        st.dataframe(
+            df_long,
+            column_config={
+                "1W%": st.column_config.NumberColumn("1W%", format="%.2f%%"),
+                "1M%": st.column_config.NumberColumn("1M%", format="%.2f%%"),
+                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
+                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
+                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
+            },
+            hide_index=True,
+            use_container_width=True
+        )
+
+    st.markdown("</div>", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────
+# POSITION TRACKER (Moved to bottom)
+# ──────────────────────────────────────────────
+
+st.divider()
 st.markdown("### 📊 Position Tracker")
 
 col1, col2, col3 = st.columns([2, 2, 1])
 with col1:
-    search_symbol = st.text_input("🔍 Symbol", placeholder="e.g., HBL, LUCK, PPL", key="search").upper()
+    symbol_in = st.text_input("🔍 Symbol", placeholder="e.g., HBL, LUCK, PPL", key="sym").upper()
 with col2:
-    entry_price = st.number_input("Entry Price", min_value=0.0, step=0.01, key="entry")
+    entry_in = st.number_input("Entry Price", min_value=0.0, step=0.01, key="entry")
 with col3:
-    st.write("")  # Spacer
     st.write("")
-    if st.button("➕ Add", use_container_width=True) and search_symbol and entry_price > 0:
-        # Check if symbol exists
-        if search_symbol in KSE100_SYMBOLS:
-            st.session_state.positions.append({"symbol": search_symbol, "entry": entry_price})
-            st.success(f"✓ Added {search_symbol} @ {entry_price}")
+    st.write("")
+    if st.button("➕ Add", use_container_width=True) and symbol_in and entry_in > 0:
+        if symbol_in in KSE100_SYMBOLS:
+            st.session_state.positions.append({"symbol": symbol_in, "entry": entry_in})
+            st.success(f"✓ Added {symbol_in} @ {entry_in}")
             st.rerun()
         else:
-            st.error(f"Symbol {search_symbol} not found in KSE100")
+            st.error(f"Symbol {symbol_in} not in KSE100")
 
-# Display positions
 if st.session_state.positions:
-    raw_data = fetch_market_data()
-    
+    raw = fetch_market_data()
+
     for idx, pos in enumerate(st.session_state.positions):
-        status = get_position_status(pos["symbol"], pos["entry"], raw_data)
-        
+        status = get_position_status(pos["symbol"], pos["entry"], raw)
+
         if status:
-            pnl_class = "pnl-positive" if status["pnl_pct"] > 0 else "pnl-negative"
-            conf_class = f"confidence-{status['confidence'].lower()}"
-            
-            col_a, col_b, col_c = st.columns([2, 4, 1])
-            
-            with col_a:
+            pnl_class = "pnl-pos" if status["pnl_pct"] > 0 else "pnl-neg"
+            conf_class = f"conf-{status['confidence'].lower()}"
+
+            cola, colb, colc = st.columns([2, 4, 1])
+
+            with cola:
                 st.markdown(f"""
                 <div class="position-card">
                     <div style="font-size: 1.5rem; font-weight: 800; margin-bottom: 0.4rem; font-family: 'JetBrains Mono', monospace;">
@@ -1112,15 +958,15 @@ if st.session_state.positions:
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-            
-            with col_b:
+
+            with colb:
                 st.markdown(f"""
                 <div class="position-card">
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 0.75rem;">
                         <div style="font-size: 1.05rem; font-weight: 700;">
                             {status['action']}
                         </div>
-                        <span class="confidence-badge {conf_class}">{status['confidence']}</span>
+                        <span class="conf-badge {conf_class}">{status['confidence']}</span>
                     </div>
                     <div style="font-size: 0.85rem; color: #cbd5e1; line-height: 1.7;">
                         {'<br>'.join(['• ' + s for s in status['signals'][:3]])}
@@ -1130,141 +976,76 @@ if st.session_state.positions:
                     </div>
                 </div>
                 """, unsafe_allow_html=True)
-            
-            with col_c:
+
+            with colc:
                 st.write("")
                 st.write("")
                 if st.button("🗑️", key=f"del_{idx}", use_container_width=True):
                     st.session_state.positions.pop(idx)
                     st.rerun()
-        else:
-            st.warning(f"⚠️ {pos['symbol']} - Data unavailable")
 
+# ──────────────────────────────────────────────
+# BEGINNER PLAYBOOK
+# ──────────────────────────────────────────────
 st.divider()
+st.markdown("### 🎓 Professional Trading Playbook")
+col_p1, col_p2 = st.columns(2)
+with col_p1:
+    st.info("""
+    **📈 Strategy Specifics & Scores:**
 
-# ──────────────────────────────────────────────
-# SCAN TRIGGER
-# ──────────────────────────────────────────────
+    **1. Intraday Scalps (Score ≥ 8):**
+    *   **Goal:** Capture quick, small moves (Target ~1.5%) for same-day exits.
+    *   **Entry:** Use 1-minute charts for precise timing.
+    *   **Key Indicators:**
+        *   **Volume Surge (3x+ RV):** Indicates strong institutional interest.
+        *   **VWAP Edge:** Price trading just above VWAP (Volume Weighted Average Price).
+        *   **EMA10:** Price above 10-period Exponential Moving Average.
+        *   **ADX (25+):** Confirms a strong trend is developing.
+        *   **RSI (50-65):** Healthy momentum, not overbought.
+        *   **MACD:** Bullish crossover.
 
-scan_now = is_open
+    **2. Swing Trades (Score ≥ 9):**
+    *   **Goal:** Hold for 3-5 sessions, aiming for ~7% gains.
+    *   **Entry:** Look for consolidation after a move, or a pullback to support.
+    *   **Key Indicators:**
+        *   **EMA Fan (EMA5 > EMA10 > EMA20 > EMA50):** Strong, aligned uptrend.
+        *   **ADX (25+):** Sustained trend strength.
+        *   **Value Zone:** Stock in the lower to mid-range of its 1-month price.
+        *   **Relative Volume (1.5x+):** Confirms buying interest.
+        *   **RSI (45-60):** Healthy momentum, not overextended.
+        *   **Weekly Momentum:** Positive change over the last week.
 
-if not is_open:
-    if st.button("🔍 Manual Scan", use_container_width=True):
-        scan_now = True
+    **3. Long-Term Investments (Score ≥ 8):**
+    *   **Goal:** Multi-week to multi-month holds, targeting 25%+ returns.
+    *   **Focus:** High-quality sectors like Banks and E&P.
+    *   **Key Indicators:**
+        *   **Sector Quality:** Higher quality sectors (rated 7-9) are preferred.
+        *   **Value Zone:** Stock trading near 1-month lows or showing "Double Bottom" patterns.
+        *   **RSI (30-45):** Indicates potential for reversal from oversold conditions.
+        *   **EMA50:** Price above 50-period EMA for long-term trend confirmation.
+        *   **Weekly Stability:** Not in a significant weekly drawdown.
 
-if scan_now:
-    with st.spinner("Scanning market with institutional algorithms..."):
-        raw_data = fetch_market_data()
-        df_intra, df_swing, df_long = process_signals(raw_data, market_bullish)
-    
-    # ──────────────────────────────────────────────
-    # INTRADAY
-    # ──────────────────────────────────────────────
-    
-    st.markdown(f"""
-    <div class="strategy-card">
-        <div class="strategy-header">
-            ⚡ <span style="color: #fbbf24;">INTRADAY</span> SCALPS
-        </div>
-        <div class="strategy-desc">
-            Same-day exits · ATR-based stops · VWAP + ORB confluence · Score ≥8/15
-        </div>
-    """, unsafe_allow_html=True)
-    
-    if df_intra.empty:
-        st.info("🔍 No elite intraday setups meet strict criteria")
-    else:
-        st.dataframe(
-            df_intra,
-            column_config={
-                "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                "RV": st.column_config.NumberColumn("RV", format="%.1fx"),
-                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
-                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # ──────────────────────────────────────────────
-    # SWING
-    # ──────────────────────────────────────────────
-    
-    st.markdown(f"""
-    <div class="strategy-card">
-        <div class="strategy-header">
-            🚀 <span style="color: #3b82f6;">SWING</span> TRADES
-        </div>
-        <div class="strategy-desc">
-            3-7 day holds · EMA fan alignment · Multi-timeframe · Score ≥9/18
-        </div>
-    """, unsafe_allow_html=True)
-    
-    if df_swing.empty:
-        st.info("🔍 No elite swing setups meet strict criteria")
-    else:
-        st.dataframe(
-            df_swing,
-            column_config={
-                "Chg%": st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-                "1W%": st.column_config.NumberColumn("1W%", format="%.2f%%"),
-                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
-                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # ──────────────────────────────────────────────
-    # LONG-TERM
-    # ──────────────────────────────────────────────
-    
-    st.markdown(f"""
-    <div class="strategy-card">
-        <div class="strategy-header">
-            💎 <span style="color: #10b981;">LONG-TERM</span> INVESTMENTS
-        </div>
-        <div class="strategy-desc">
-            Multi-week to months · Quality sectors · Value zones · Score ≥8/16
-        </div>
-    """, unsafe_allow_html=True)
-    
-    if df_long.empty:
-        st.info("🔍 No elite investment setups meet strict criteria")
-    else:
-        st.dataframe(
-            df_long,
-            column_config={
-                "1W%": st.column_config.NumberColumn("1W%", format="%.2f%%"),
-                "1M%": st.column_config.NumberColumn("1M%", format="%.2f%%"),
-                "RSI": st.column_config.NumberColumn("RSI", format="%.0f"),
-                "Target": st.column_config.NumberColumn("Target", format="%.2f"),
-                "Stop": st.column_config.NumberColumn("Stop", format="%.2f"),
-            },
-            hide_index=True,
-            use_container_width=True
-        )
-    
-    st.markdown("</div>", unsafe_allow_html=True)
-    
-    # Footer
-    st.markdown(f"""
-    <div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid rgba(30, 41, 59, 0.3); 
-                font-size: 0.75rem; color: #475569; font-family: 'JetBrains Mono', monospace; text-align: center;">
-        Institutional-grade algorithms · ATR stops · Market breadth filtering · Last scan: {pkt_now().strftime("%H:%M:%S")}
-    </div>
-    """, unsafe_allow_html=True)
+    **Market Breadth:** Always ensure **Advancers > Decliners** before initiating any new trades.
+    """)
+with col_p2:
+    st.info("""
+    **🛡️ Risk Management:**
+    *   **Intraday Risk:** Max 1% of your trading capital per trade. Use **ATR (Average True Range) stops** to place stops based on volatility, avoiding "noise" and premature exits.
+    *   **Swing Risk:** Max 3-4% of your trading capital per trade. **Trail your stop loss** to your entry price once the stock is up 3% to protect capital.
+    *   **Portfolio Rule:** Never allocate more than 15% of your total cash to a single stock. Diversification is key.
+    *   **The 2% Rule:** The total potential loss from all open trades should not exceed 2% of your total portfolio value. This is your ultimate safety net.
+    """)
 
-# ──────────────────────────────────────────────
+# Footer
+st.markdown(f"""
+<div style="margin-top: 2rem; padding-top: 1rem; border-top: 1px solid rgba(30, 41, 59, 0.3);
+            font-size: 0.75rem; color: #475569; font-family: 'JetBrains Mono', monospace; text-align: center;">
+    Institutional algorithms · ATR stops · Market breadth filter · Last: {pkt_now().strftime("%H:%M:%S")}
+</div>
+""", unsafe_allow_html=True)
+
 # AUTO REFRESH
-# ──────────────────────────────────────────────
-
 if is_open:
     import time
     time.sleep(CONFIG["REFRESH_RATE"])
