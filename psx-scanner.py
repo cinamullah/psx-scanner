@@ -21,7 +21,7 @@ CONFIG = {
     "MARKET_BREADTH_THRESHOLD": 0.0,
 }
 
-KSE100_SYMBOLS = ["WTL", "KEL", "BOP", "CNERGY", "PRL","TRG", "SYS", "NETSOL", "ATRL", "NRL", "MLCF", "DGKC", "CHCC", "AIRLINK","FFC", "EFERT", "HUBC", "MARI", "OGDC", "PPL", "UBL", "MEBL", "BAHL", "LUCK"]
+KSE100_SYMBOLS = ["TRG", "SYS", "NETSOL", "AIRLINK", "ATRL", "NRL", "PRL", "MLCF", "DGKC", "LUCK", "CHCC", "KOHCK", "BWCL", "FCCL", "HCAR", "ATLH", "MTL", "THALL", "HUBC", "PAEL", "KEL", "NCPL", "KAPCO", "MEBL", "UBL", "BAFL", "AKBL", "BAHL", "EFERT", "FFC", "FATIMA", "SFERT", "SNGP", "APL", "MUREB", "RAFHAN", "COLG", "BNWM", "KTML", "ABOT", "SEARL"]
 
 SECTORS = {
     "Banks": {"symbols": ["MEBL","UBL","ABL","BAFL","BAHL","BOP","NBP"], "quality": 9},
