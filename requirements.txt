@@ -3,3 +3,4 @@ pandas
 requests
 pytz
 urllib3
+yfinance
