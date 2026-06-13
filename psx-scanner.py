@@ -5,6 +5,12 @@ from datetime import datetime, timedelta
 import pytz
 from requests.adapters import HTTPAdapter
 import html
+import os
+import sqlite3
+import yfinance as yf
+import streamlit.components.v1 as components
+
+import time
 from urllib3.util.retry import Retry
 from typing import Dict, List, Tuple, Optional
 
@@ -12,16 +18,27 @@ from typing import Dict, List, Tuple, Optional
 # CONFIGURATION
 # ═══════════════════════════════════════════════════════════════════════════════
 
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
 CONFIG = {
-    "START_TIME": "09:17",
+    "START_TIME": "09:30",
     "END_TIME": "15:30",
-    "REFRESH_RATE": 120,
-    "MIN_LIQUIDITY": 50000,
+    "REFRESH_RATE": 180,
+    "MIN_LIQUIDITY": 150000,
     "ATR_STOP_MULTIPLIER": 1.5,
     "MARKET_BREADTH_THRESHOLD": 0.0,
+    "INSTITUTIONAL_VOL_THRESHOLD": 2.5,
+    "DB_PATH": os.path.join(BASE_DIR, "psx_market_history.db"),
+    "HISTORICAL_DAYS": 30
 }
 
-KSE100_SYMBOLS = ["TRG", "SYS", "NETSOL", "AIRLINK", "ATRL", "NRL", "PRL", "MLCF", "DGKC", "LUCK", "CHCC", "KOHCK", "BWCL", "FCCL", "HCAR", "ATLH", "MTL", "THALL", "HUBC", "PAEL", "KEL", "NCPL", "KAPCO", "MEBL", "UBL", "BAFL", "AKBL", "BAHL", "EFERT", "FFC", "FATIMA", "SFERT", "SNGP", "APL", "MUREB", "RAFHAN", "COLG", "BNWM", "KTML", "ABOT", "SEARL"]
+KSE100_SYMBOLS = [
+    "CNERGY", "BOP", "PRL", "WTL", "KOSM", "KEL", "UNITY", "NCPL", "CSIL", "PAEL",
+    "SSGC", "TRG", "ATRL", "MLCF", "SYS", "NPL", "CLOV", "YOUW", "TELE", "PTC",
+    "NBP", "LUCK", "DGKC", "SNGP", "PSO", "NRL", "OGDC", "POL", "PPL", "NETSOL",
+    "MEBL", "UBL", "ABL", "BAFL", "BAHL", "MARI", "FFC", "ENGROH", "EFERT", "ATLH",
+    "HCAR", "MTL", "COLG", "ABOT", "ILP", "PIBTL", "TGL", "CHCC", "HUBC"
+]
 
 SECTORS = {
     "Banks": {"symbols": ["MEBL","UBL","ABL","BAFL","BAHL","BOP","NBP"], "quality": 9},
@@ -43,6 +60,88 @@ SYMBOL_TO_SECTOR = {sym: sec for sec, data in SECTORS.items() for sym in data["s
 # ═══════════════════════════════════════════════════════════════════════════════
 # UTILITIES
 # ═══════════════════════════════════════════════════════════════════════════════
+
+def init_db():
+    """Initialize the local institutional database."""
+    conn = sqlite3.connect(CONFIG["DB_PATH"])
+    conn.execute("""
+        CREATE TABLE IF NOT EXISTS price_history (
+            date TEXT,
+            symbol TEXT,
+            close REAL,
+            volume INTEGER,
+            PRIMARY KEY (date, symbol)
+        )
+    """)
+    conn.commit()
+    conn.close()
+
+def sync_historical_data():
+    """Syncs 60 days of historical data from Yahoo Finance for institutional context."""
+    end_date = datetime.now()
+    start_date = end_date - timedelta(days=75)
+
+    conn = sqlite3.connect(CONFIG["DB_PATH"])
+
+    # Use the symbols from CONFIG but with .KA suffix for YF
+    tickers = [f"{sym}.KA" for sym in KSE100_SYMBOLS]
+
+    status_placeholder = st.sidebar.empty()
+    progress_bar = st.sidebar.progress(0)
+
+    for i, ticker in enumerate(tickers):
+        symbol = ticker.split('.')[0]
+        status_placeholder.caption(f"🔄 Syncing {symbol}...")
+        try:
+            df = yf.download(ticker, start=start_date, end=end_date, progress=False, multi_level_index=False)
+            if not df.empty:
+                df.columns = [col[0] if isinstance(col, tuple) else col for col in df.columns]
+                df = df.reset_index().rename(columns={"Date": "date", "Close": "close", "Volume": "volume"})
+                df['date'] = pd.to_datetime(df['date']).dt.strftime('%Y-%m-%d')
+
+                for _, row in df.iterrows():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO price_history (date, symbol, close, volume) VALUES (?, ?, ?, ?)",
+                        (row['date'], symbol, _safe(row['close']), _safe(row['volume']))
+                    )
+        except Exception as e:
+            print(f"❌ Error syncing {symbol}: {e}")
+        progress_bar.progress((i + 1) / len(tickers))
+
+    conn.commit()
+    conn.close()
+    status_placeholder.success("✅ History Sync Complete!")
+    # These lines were moved from the main content area back to the sidebar context
+    time.sleep(2)
+    status_placeholder.empty()
+    progress_bar.empty()
+
+def save_market_snapshot(raw_data: List[Dict]):
+    """Saves today's closing reading for historical context."""
+    if not raw_data: return
+    today = pkt_now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(CONFIG["DB_PATH"])
+    for item in raw_data:
+        d = item["d"]
+        conn.execute(
+            "INSERT OR REPLACE INTO price_history VALUES (?, ?, ?, ?)",
+            (today, d[0], _safe(d[1]), _safe(d[3]))
+        )
+    # Prune old data
+    cutoff = (pkt_now() - timedelta(days=60)).strftime("%Y-%m-%d")
+    conn.execute("DELETE FROM price_history WHERE date < ?", (cutoff,))
+    conn.commit()
+    conn.close()
+
+def get_stability_score(symbol: str) -> float:
+    """Calculates Trend Quality: % of days the stock closed higher over last 20 days."""
+    conn = sqlite3.connect(CONFIG["DB_PATH"])
+    query = f"SELECT close FROM price_history WHERE symbol = ? ORDER BY date DESC LIMIT 20"
+    prices = [r[0] for r in conn.execute(query, (symbol,)).fetchall()]
+    conn.close()
+    if len(prices) < 5: return 0.0
+    up_days = sum(1 for i in range(len(prices)-1) if prices[i] >= prices[i+1])
+    return (up_days / (len(prices)-1)) * 10
 
 def pkt_now():
     return datetime.now(pytz.timezone("Asia/Karachi"))
@@ -87,6 +186,7 @@ def get_session():
 @st.cache_data(ttl=25, show_spinner=False)
 def fetch_market_data():
     payload = {
+        "sort": {"sortBy": "name", "sortOrder": "asc"},
         "filter": [{"left": "name", "operation": "in_range", "right": KSE100_SYMBOLS}],
         "markets": ["pakistan"],
         "columns": TV_COLUMNS,
@@ -162,142 +262,114 @@ def fetch_sarmaaya_index():
 # SIGNAL LOGIC
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def analyze_intraday(price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish):
+def analyze_intraday(price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish, market_change):
     score = 0
     reasons = []
 
-    penalty = 0 if bullish else -2
+    # HARD FILTER: Institutional Grade mandatory checks
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+    if price <= vwap or vol_ratio < 1.2:
+        return 0, [], 0, 0
 
-    # Volume surge
-    if vol_ratio > 3.0:
-        score += 4
-        reasons.append(f"🐋 {vol_ratio:.1f}x Vol")
-    elif vol_ratio > 2.0:
+    # 1. Relative Strength (Institutional Grade Filter)
+    rs_score = change - market_change
+    if rs_score > 0.5:
         score += 3
-        reasons.append(f"{vol_ratio:.1f}x Vol")
-    elif rv > 1.5:
-        score += 2
+        reasons.append(f"RS Alpha {rs_score:+.1f}")
 
-    # VWAP edge
+    # 2. Institutional Volume Footprint
+    if vol_ratio > CONFIG["INSTITUTIONAL_VOL_THRESHOLD"]:
+        score += 4
+        reasons.append(f"🐋 Inst. Volume ({vol_ratio:.1f}x)")
+
+    # 3. VWAP Anchor (Professional Entry Logic)
     if price > vwap:
         dist = ((price - vwap) / vwap) * 100
-        if dist < 1.5:
+        if dist < 0.8:  # Pullback to VWAP (Institutional Entry)
+            score += 4
+            reasons.append("VWAP Bounce Zone")
+        elif dist < 2.0:
             score += 2
-            reasons.append("VWAP Edge")
-        elif dist > 3:
-            score -= 1
+            reasons.append("Above VWAP")
 
-    # EMA alignment
-    if price > ema10:
+    # 4. Momentum Velocity (ADX + EMA)
+    if price > ema10 and change > 0:
         score += 2
-        reasons.append("EMA+")
-
-    # ADX strength
-    if adx > 30:
+    if adx > 25:
         score += 3
-        reasons.append(f"ADX{adx:.0f}")
-    elif adx > 25:
-        score += 2
 
-    # RSI
-    if 50 < rsi < 65:
-        score += 2
-        reasons.append(f"RSI{rsi:.0f}")
-    elif rsi >= 75:
+    # 5. Momentum Decay
+    if rsi >= 78:
         score -= 2
-        reasons.append("Overbought")
+        reasons.append("⚠️ Exhaustion")
 
-    # MACD
-    if macd > macd_sig and macd > 0:
-        score += 2
-        reasons.append("MACD+")
-
-    # Stochastic
-    if 30 < stoch < 80:
-        score += 1
-
-    score += penalty
+    if not bullish: score -= 3
 
     stop = round(price - (0.5 * atr), 2) if atr > 0 else round(price * 0.99, 2)
     target = round(price + (0.8 * atr), 2) if atr > 0 else round(price * 1.018, 2)
-
-    if price - stop <= 0:
-        stop = round(price * 0.985, 2)
-
     return score, reasons, target, stop
 
-def analyze_swing(price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish):
+def analyze_swing(price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish, market_change, stability_score):
     score = 0
     reasons = []
 
-    penalty = 0 if bullish else -1
-    ema5 = ema10 * 1.01
+    # HARD FILTER: Swing MUST be in an established uptrend
+    if price <= ema20 or price <= ema50:
+        return 0, [], 0, 0
 
-    # EMA fan
-    if check_ema_fan(ema5, ema10, ema20, ema50):
+    # 1. Multi-Day Structure
+    # price > ema10 > ema20 > ema50
+    ema_alignment = check_ema_fan(price, ema10, ema20, ema50)
+    if ema_alignment:
         score += 4
-        reasons.append("EMA Fan ✓")
-    elif price > ema20 and price > ema50:
+        reasons.append("Trend Alignment")
+    elif price > ema20 > ema50:
         score += 2
-        reasons.append("EMA20/50+")
+        reasons.append("Rising Trend")
 
-    # ADX
+    # 2. Historical Stability (The DB edge)
+    if stability_score > 7:
+        score += 3
+        reasons.append("💎 Steady Accumulation")
+    elif stability_score < 3:
+        score -= 2 # High volatility/erratic
+
+    # 2. Volatility Compression (Professional "Squeeze" setup)
     if adx > 25:
         score += 3
-        reasons.append(f"ADX{adx:.0f}")
-    elif adx > 20:
-        score += 2
 
-    # Range position
+    # 3. Value Detection (Mean Reversion)
     if low1m > 0 and high1m > 0:
         pos = (price - low1m) / (high1m - low1m)
-        if 0.2 < pos < 0.5:
+        if 0.15 < pos < 0.4:
             score += 3
-            reasons.append("Value Zone")
-        elif pos > 0.85:
-            score -= 2
+            reasons.append("Early Cycle")
 
-    # Volume
+    # 4. Volume Persistence
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-    if vol_ratio > 1.5:
+    if vol_ratio > 1.8:
         score += 2
-        reasons.append(f"{vol_ratio:.1f}x RV")
-    elif rv > 1.2:
-        score += 1
 
-    # RSI
+    # 5. Momentum Check
     if 45 < rsi < 60:
         score += 3
-        reasons.append(f"RSI{rsi:.0f}")
-    elif rsi > 70:
-        score -= 2
 
-    # Weekly momentum
-    if change1w > 3:
-        score += 1
-        reasons.append(f"1W+{change1w:.1f}%")
-
-    # MACD
-    if macd > macd_sig:
-        score += 1
-
-    score += penalty
+    if not bullish: score -= 2
 
     stop = round(price - (1.2 * atr), 2) if atr > 0 else round(price * 0.96, 2)
     target = round(price + (2.5 * atr), 2) if atr > 0 else round(price * 1.075, 2)
-
-    if price - stop <= 0:
-        stop = round(price * 0.93, 2)
-
     return score, reasons, target, stop
 
-def analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol):
+def analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol, stability_score):
     score = 0
     reasons = []
 
-    # Sector quality
+    # HARD FILTER: Quality + Stability check
     quality = SECTORS.get(sector, {"quality": 5})["quality"]
+    if quality < 7 or stability_score < 4:
+        return 0, [], 0, 0
+
+    # Sector quality
     if quality >= 9:
         score += 3
         reasons.append(f"{sector}")
@@ -331,6 +403,10 @@ def analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, 
         score += 3
         reasons.append("EMA50+")
 
+    # Historical validation
+    if stability_score > 6:
+        score += 2
+
     # Weekly stability
     if change1w > -5:
         score += 1
@@ -348,7 +424,7 @@ def analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, 
 
     return score, reasons, target, stop
 
-def process_signals(raw_data, bullish):
+def process_signals(raw_data, bullish, market_change):
     if not raw_data:
         return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
@@ -382,16 +458,15 @@ def process_signals(raw_data, bullish):
         stoch = _safe(d[20])
 
         sector = SYMBOL_TO_SECTOR.get(sym, "Other")
+        stability = get_stability_score(sym)
 
         if vol < CONFIG["MIN_LIQUIDITY"]:
             continue
 
         # INTRADAY
-        score, reasons, target, stop = analyze_intraday(
-            price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish
-        )
+        score, reasons, target, stop = analyze_intraday(price, change, rv, rsi, macd, macd_sig, ema10, vwap, adx, stoch, vol, avg_vol, atr, bullish, market_change)
 
-        if score >= 8:
+        if score >= 11: # Raised from 8 to only show high-conviction scalps
             denom = price - stop
             rr = (target - price) / denom if denom > 0 else 0
 
@@ -404,11 +479,9 @@ def process_signals(raw_data, bullish):
             })
 
         # SWING
-        score, reasons, target, stop = analyze_swing(
-            price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish
-        )
+        score, reasons, target, stop = analyze_swing(price, change, rv, rsi, macd, macd_sig, ema10, ema20, ema50, change1w, low1m, adx, atr, high1m, vol, avg_vol, bullish, market_change, stability)
 
-        if score >= 9:
+        if score >= 12: # Raised from 9 to filter out weak momentum
             denom = price - stop
             rr = (target - price) / denom if denom > 0 else 0
 
@@ -422,11 +495,9 @@ def process_signals(raw_data, bullish):
 
         # LONG-TERM
         perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0
-        score, reasons, target, stop = analyze_longterm(
-            price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol
-        )
+        score, reasons, target, stop = analyze_longterm(price, rsi, ema20, ema50, change1w, low1m, high1m, sector, vol, avg_vol, stability)
 
-        if score >= 8:
+        if score >= 10: # Raised from 8 to enforce value + quality
             denom = price - stop
             rr = (target - price) / denom if denom > 0 else 0
 
@@ -542,6 +613,8 @@ st.markdown("""
 * { font-family: 'Inter', -apple-system, sans-serif; }
 html, body, [class*="css"] { background: #0a0e1a !important; color: #e2e8f0 !important; }
 code, pre, .mono { font-family: 'JetBrains Mono', monospace !important; }
+
+footer {visibility: hidden;}
 
 .pro-header {
     background: linear-gradient(135deg, rgba(30, 41, 59, 0.7) 0%, rgba(15, 23, 42, 0.8) 100%);
@@ -769,6 +842,15 @@ st.markdown(f'''<div style="background: rgba(30, 41, 59, 0.4); border: 1px solid
 # SCAN
 # ──────────────────────────────────────────────
 
+init_db()
+
+# Professional Maintenance Sidebar
+st.sidebar.markdown("### 🛠️ Market Data")
+if st.sidebar.button("🔄 Sync Historical Data", help="Fetch 60 days of history for Stability Scores"):
+    with st.sidebar.spinner("Backfilling historical data..."):
+        sync_historical_data()
+    st.rerun()
+
 scan = is_open
 
 if not is_open:
@@ -778,6 +860,7 @@ if not is_open:
 if scan:
     with st.spinner("Scanning market..."):
         raw = fetch_market_data()
+        save_market_snapshot(raw)
 
         # Sector performance
         sec_perf = {}
@@ -806,7 +889,7 @@ if scan:
         st.markdown(sector_html, unsafe_allow_html=True)
         st.write("")
 
-        df_intra, df_swing, df_long = process_signals(raw, bullish)
+        df_intra, df_swing, df_long = process_signals(raw, bullish, avg_chg)
 
     # INTRADAY
     st.markdown("""
