@@ -1234,26 +1234,15 @@ with c_btns:
         sync_historical_data(KSE100)
         st.rerun()
 
-st.markdown(f"""
-<div style="display: flex; flex-wrap: nowrap; justify-content: space-between; gap: 8px; overflow-x: auto; padding-bottom: 8px; margin-bottom: 1rem;">
-    <div style="flex: 1; min-width: 90px;">
-        <div style="font-size:0.65rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">KSE-100</div>
-        <div style="font-size:0.95rem; font-weight:700; white-space: nowrap;">{idx_close:,.0f} <span style="font-weight:400; color:{'#10b981' if idx_pct >= 0 else '#ef4444'}; font-size:0.7rem;">{idx_pct:+.2f}%</span></div>
-    </div>
-    <div style="flex: 1; min-width: 90px;">
-        <div style="font-size:0.65rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">Market State</div>
-        <div style="font-size:0.95rem; font-weight:700;">{'LIVE' if is_open else 'CLOSED'}</div>
-    </div>
-    <div style="flex: 1; min-width: 90px;">
-        <div style="font-size:0.65rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">A/D Ratio</div>
-        <div style="font-size:0.95rem; font-weight:700; white-space: nowrap;">{adv} ▲ / {dec} ▼</div>
-    </div>
-    <div style="flex: 1; min-width: 90px;">
-        <div style="font-size:0.65rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">Volume</div>
-        <div style="font-size:0.95rem; font-weight:700;">{vol_cr:.1f} Cr</div>
-    </div>
-</div>
-""", unsafe_allow_html=True)
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>KSE-100</div><div style='font-size:1.1rem; font-weight:700;'>{idx_close:,.0f} <span style='font-weight:400; color:{'#10b981' if idx_pct >= 0 else '#ef4444'}; font-size:0.85rem;'>{idx_pct:+.2f}%</span></div>", unsafe_allow_html=True)
+with m2:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market State</div><div style='font-size:1.1rem; font-weight:700;'>{'LIVE' if is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
+with m3:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>A/D Ratio</div><div style='font-size:1.1rem; font-weight:700;'>{adv} ▲ / {dec} ▼</div>", unsafe_allow_html=True)
+with m4:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market Volume</div><div style='font-size:1.1rem; font-weight:700;'>{vol_cr:.1f} Cr</div>", unsafe_allow_html=True)
 
 # ─── Market breadth warning ───────────────────────────────────────────────────
 if not bullish:
