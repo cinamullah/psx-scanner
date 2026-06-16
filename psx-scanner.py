@@ -22,8 +22,8 @@ from urllib3.util.retry import Retry
 from typing import Dict, List, Optional, Tuple
 
 st.set_page_config(
-    page_title="PSX Elite Scanner", page_icon="⚡",
-    layout="wide", initial_sidebar_state="expanded"
+    page_title="PSX Elite Scanner",
+    layout="wide"
 )
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -162,48 +162,37 @@ def init_db():
     conn.commit()
     conn.close()
 
-def sync_historical_data():
-    """Pull 90 days of full OHLCV from Yahoo Finance for pattern & indicator calculation."""
-    end   = datetime.now()
+def sync_historical_data(symbols: List[str]):
+    """Optimized batch download from Yahoo Finance."""
+    end = datetime.now()
     start = end - timedelta(days=CFG["HIST_DAYS"])
-    conn  = sqlite3.connect(CFG["DB_PATH"])
+    tickers = [f"{s}.KA" for s in symbols]
 
-    ph   = st.sidebar.empty()
-    prog = st.sidebar.progress(0)
-    errors = []
+    ph = st.empty()
+    ph.caption("🔄 Fetching Market History...")
 
-    for i, sym in enumerate(KSE100):
-        ph.caption(f"🔄 {sym} ({i+1}/{len(KSE100)})")
+    # Batch download is much faster than sequential
+    df = yf.download(tickers, start=start, end=end, group_by='ticker', progress=False)
+
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    for sym in symbols:
         try:
-            df = yf.download(f"{sym}.KA", start=start, end=end, progress=False, multi_level_index=False)
-            if not df.empty:
-                df = df.reset_index()
-                df.columns = [c[0] if isinstance(c, tuple) else c for c in df.columns]
-                df["date"] = pd.to_datetime(df["Date"]).dt.strftime("%Y-%m-%d")
-                rows = []
-                for _, r in df.iterrows():
-                    rows.append((
-                        r["date"], sym,
-                        safe(r.get("Open")), safe(r.get("High")),
-                        safe(r.get("Low")),  safe(r.get("Close")),
-                        int(safe(r.get("Volume")))
-                    ))
-                conn.executemany(
-                    "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
-                )
-        except Exception as e:
-            errors.append(sym)
+            ticker_df = df[f"{sym}.KA"].dropna().reset_index()
+            if ticker_df.empty: continue
 
-    cutoff = (datetime.now() - timedelta(days=85)).strftime("%Y-%m-%d")
-    conn.execute("DELETE FROM price_history WHERE date < ?", (cutoff,))
+            rows = []
+            for _, r in ticker_df.iterrows():
+                rows.append((
+                    r["Date"].strftime("%Y-%m-%d"), sym,
+                    float(r["Open"]), float(r["High"]),
+                    float(r["Low"]), float(r["Close"]), int(r["Volume"])
+                ))
+            conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+        except Exception: continue
+
     conn.commit()
     conn.close()
-
-    msg = f"✅ Sync done" + (f" ({len(errors)} failed: {','.join(errors[:5])})" if errors else "")
-    ph.success(msg)
-    time.sleep(2)
-    ph.empty()
-    prog.empty()
+    ph.success("✅ Sync Complete")
 
 def save_snapshot(raw: list):
     """Persist today's live prices — uses open/high/low/close from intraday data."""
@@ -229,47 +218,14 @@ def save_snapshot(raw: list):
 # HISTORICAL ANALYTICS ENGINE
 # ══════════════════════════════════════════════════════════════════════════════
 
-def _ema_series(prices: list, period: int) -> list:
-    """Compute EMA for a list of prices (oldest→newest order)."""
-    if len(prices) < period:
-        return []
-    k = 2.0 / (period + 1)
-    ema = [sum(prices[:period]) / period]
-    for p in prices[period:]:
-        ema.append(p * k + ema[-1] * (1 - k))
-    return ema
-
-def _rsi_series(closes: list, period: int = 14) -> list:
-    """Calculate RSI series."""
-    if len(closes) < period + 1:
-        return []
-    gains, losses = [], []
-    for i in range(1, len(closes)):
-        d = closes[i] - closes[i-1]
-        gains.append(max(d, 0))
-        losses.append(max(-d, 0))
-    avg_g = sum(gains[:period]) / period
-    avg_l = sum(losses[:period]) / period
-    rsi_vals = []
-    for i in range(period, len(gains)):
-        avg_g = (avg_g * (period - 1) + gains[i]) / period
-        avg_l = (avg_l * (period - 1) + losses[i]) / period
-        rs = avg_g / avg_l if avg_l > 0 else 100
-        rsi_vals.append(100 - 100 / (1 + rs))
-    return rsi_vals
-
-def get_hist_metrics(symbol: str) -> Dict:
+def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     """
-    Full historical analytics — the backbone of swing and long-term scoring.
-    Returns 15+ computed metrics from stored OHLCV data.
+    Vectorized historical analytics. Uses an existing DB connection for performance.
     """
-    conn = sqlite3.connect(CFG["DB_PATH"])
-    rows = conn.execute(
-        "SELECT date, open, high, low, close, volume FROM price_history "
-        "WHERE symbol=? ORDER BY date ASC LIMIT 25",
-        (symbol,)
-    ).fetchall()
-    conn.close()
+    df = pd.read_sql(
+        "SELECT open, high, low, close, volume FROM price_history WHERE symbol=? ORDER BY date ASC",
+        db_conn, params=(symbol,)
+    )
 
     empty = {
         "has_data": False, "n": 0,
@@ -284,119 +240,114 @@ def get_hist_metrics(symbol: str) -> Dict:
         "squeeze": False,
     }
 
-    if len(rows) < 10:
+    if len(df) < 20: # Minimum 20 days for robust calculations (e.g., ATR, BB)
         return empty
 
-    dates   = [r[0] for r in rows]
-    opens   = [r[1] for r in rows]
-    highs   = [r[2] for r in rows]
-    lows    = [r[3] for r in rows]
-    closes  = [r[4] for r in rows]
-    volumes = [r[5] for r in rows]
-
-    n = len(closes)
+    n = len(df)
+    c = df['close']
+    h = df['high']
+    l = df['low']
+    v = df['volume']
 
     # ── 1. Trend metrics ──────────────────────────────────────────────────────
-    trend_pct_30 = (closes[-1] / closes[max(0, n-15)] - 1) * 100 if n >= 15 else 0.0
-    trend_pct_10 = (closes[-1] / closes[max(0, n-15)] - 1) * 100 if n >= 15 else 0.0
+    trend_pct_30 = (c.iloc[-1] / c.iloc[max(0, n-30)] - 1) * 100 if n >= 30 else 0.0
+    trend_pct_10 = (c.iloc[-1] / c.iloc[max(0, n-10)] - 1) * 100 if n >= 10 else 0.0
 
     # ── 2. Stability (% of up-days, last 15 sessions) ─────────────────────────
-    recent_n = min(15, n - 1)
-    up_days  = sum(1 for i in range(n - recent_n, n) if closes[i] >= closes[i-1])
-    stability = up_days / recent_n * 10 if recent_n > 0 else 0
+    up_days = (c.diff() >= 0).tail(15).sum()
+    stability = (up_days / 15) * 10 if n >= 15 else 0.0
 
     # ── 3. Volume analytics ───────────────────────────────────────────────────
-    avg_vol     = sum(volumes[-30:]) / min(30, n)
-    recent_vol  = sum(volumes[-5:]) / 5 if n >= 5 else avg_vol
-    older_vol   = sum(volumes[-20:-5]) / 15 if n >= 20 else avg_vol
-    vol_trend   = (recent_vol / older_vol - 1) * 100 if older_vol > 0 else 0.0  # rising volume?
+    avg_vol = v.tail(30).mean() if n >= 30 else v.mean()
+    recent_vol = v.tail(5).mean() if n >= 5 else avg_vol
+    older_vol = v.iloc[-20:-5].mean() if n >= 20 else avg_vol
+    vol_trend = (recent_vol / older_vol - 1) * 100 if older_vol > 0 else 0.0
 
     # ── 4. True-Range ATR (20-period) ─────────────────────────────────────────
-    trs = []
-    for i in range(1, n):
-        tr = max(highs[i] - lows[i], abs(highs[i] - closes[i-1]), abs(lows[i] - closes[i-1]))
-        trs.append(tr)
-    atr_20 = sum(trs[-20:]) / min(20, len(trs)) if trs else 0.0
+    tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
+    atr_20 = tr.rolling(20).mean().iloc[-1] if len(tr) >= 20 else 0.0
 
     # ── 5. Historical volatility (std dev of daily returns, annualised %) ─────
-    if n >= 10:
-        returns = [(closes[i] / closes[i-1] - 1) for i in range(1, n)]
-        mean_r  = sum(returns) / len(returns)
-        var     = sum((r - mean_r)**2 for r in returns) / len(returns)
-        volatility = math.sqrt(var) * math.sqrt(252) * 100
-    else:
-        volatility = 0.0
+    returns = c.pct_change().dropna()
+    volatility = returns.tail(20).std() * math.sqrt(252) * 100 if len(returns) >= 20 else 0.0
 
     # ── 6. Momentum (EMA5 vs EMA20 on close) ─────────────────────────────────
-    ema5_s  = _ema_series(closes, 5)
-    ema10_s = _ema_series(closes, 10)
-    ema20_s = _ema_series(closes, 20)
+    ema5 = c.ewm(span=5, adjust=False).mean()
+    ema10 = c.ewm(span=10, adjust=False).mean()
+    ema20 = c.ewm(span=20, adjust=False).mean()
 
-    momentum = 0.0
-    ema10_slope = 0.0
-    ema20_slope = 0.0
-
-    if len(ema5_s) >= 2 and len(ema20_s) >= 2:
-        momentum = (ema5_s[-1] / ema20_s[-1] - 1) * 100
-    if len(ema10_s) >= 5:
-        ema10_slope = (ema10_s[-1] / ema10_s[-5] - 1) * 100
-    if len(ema20_s) >= 5:
-        ema20_slope = (ema20_s[-1] / ema20_s[-5] - 1) * 100
+    momentum = (ema5.iloc[-1] / ema20.iloc[-1] - 1) * 100 if len(ema5) >= 2 and len(ema20) >= 2 else 0.0
+    ema10_slope = (ema10.iloc[-1] / ema10.iloc[max(0, len(ema10)-5)] - 1) * 100 if len(ema10) >= 5 else 0.0
+    ema20_slope = (ema20.iloc[-1] / ema20.iloc[max(0, len(ema20)-5)] - 1) * 100 if len(ema20) >= 5 else 0.0
 
     # ── 7. Historical RSI (14-period) & its slope ─────────────────────────────
-    rsi_s = _rsi_series(closes, 14)
-    rsi_hist  = rsi_s[-1]  if rsi_s else 50.0
-    rsi_slope = (rsi_s[-1] - rsi_s[-4]) if len(rsi_s) >= 4 else 0.0
+    delta = c.diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    # Use Wilder's smoothing for RSI (com = period - 1)
+    avg_gain = gain.ewm(com=13, adjust=False).mean()
+    avg_loss = loss.ewm(com=13, adjust=False).mean()
+    rs = avg_gain / avg_loss
+    rsi_series = 100 - (100 / (1 + rs))
+
+    rsi_hist = rsi_series.iloc[-1] if not pd.isna(rsi_series.iloc[-1]) else 50.0
+    rsi_slope = (rsi_series.iloc[-1] - rsi_series.iloc[max(0, len(rsi_series)-4)]) if len(rsi_series) >= 4 else 0.0
 
     # ── 8. Support / resistance (swing lows & highs last 15 bars) ─────────────
-    lookback = min(15, n)
-    swing_lows  = [lows[i]  for i in range(n - lookback, n) if i > 0 and lows[i]  < lows[i-1]  and (i+1 >= n or lows[i]  < lows[i+1])]
-    swing_highs = [highs[i] for i in range(n - lookback, n) if i > 0 and highs[i] > highs[i-1] and (i+1 >= n or highs[i] > highs[i+1])]
-    support_level    = max(swing_lows)  if swing_lows  else min(lows[-lookback:])
-    resistance_level = min(swing_highs) if swing_highs else max(highs[-lookback:])
+    support_level = l.tail(15).min() if n >= 15 else 0.0
+    resistance_level = h.tail(15).max() if n >= 15 else 0.0
 
     # ── 9. Consecutive direction streak ───────────────────────────────────────
     consec_up = consec_down = 0
-    for i in range(n-1, 0, -1):
-        if closes[i] >= closes[i-1]:
-            if consec_down > 0: break
-            consec_up += 1
-        else:
-            if consec_up > 0: break
-            consec_down += 1
+    if n > 1:
+        diffs = c.diff().dropna()
+        for val in reversed(diffs):
+            if val > 0:
+                if consec_down > 0: break # Streak broken if direction changes
+                consec_up += 1
+            elif val < 0:
+                if consec_up > 0: break # Streak broken if direction changes
+                consec_down += 1
+            else: # Flat day, consider streak broken
+                break
 
     # ── 10. Higher-lows pattern (last 5 swing lows rising) ───────────────────
-    if len(swing_lows) >= 3:
-        sl3 = swing_lows[-3:]
-        higher_lows = sl3[0] < sl3[1] < sl3[2]
-    else:
-        higher_lows = False
+    higher_lows = False
+    if n >= 3:
+        # Check if the last 3 daily lows are successively higher
+        if l.iloc[-1] > l.iloc[-2] and l.iloc[-2] > l.iloc[-3]:
+            higher_lows = True
 
     # ── 10b. Triple-lows pattern (bottoming) ──────────────────────────────────
     triple_bottom = False
-    if len(swing_lows) >= 3:
-        sl3 = swing_lows[-3:]
-        # Within 1.5% of each other
-        if abs(sl3[2]/sl3[1]-1) < 0.015 and abs(sl3[1]/sl3[0]-1) < 0.015:
-            triple_bottom = True
+    if n >= 5: # Need enough data to find potential swing lows
+        # A simple approximation for triple bottom: look for three recent lows within a small range
+        recent_lows = l.tail(5)
+        if len(recent_lows) >= 3:
+            min_low = recent_lows.min()
+            max_low = recent_lows.max()
+            # If the range of recent lows is very small, it could indicate a bottoming pattern
+            if (max_low - min_low) / min_low < 0.02: # e.g., within 2%
+                triple_bottom = True
 
     # ── 11. Volume accumulation (rising vol on up-days) ──────────────────────
-    if n >= 10:
-        up_vol   = sum(volumes[i] for i in range(n-10, n) if closes[i] >= closes[i-1])
-        down_vol = sum(volumes[i] for i in range(n-10, n) if closes[i] <  closes[i-1])
-        vol_accumulation = up_vol > down_vol * 1.3
-    else:
-        vol_accumulation = False
+    vol_accumulation = False
+    if n >= 10: # Need at least 10 days for this
+        up_days_mask = c.diff() > 0
+        down_days_mask = c.diff() < 0
+        up_vol = v[up_days_mask].tail(10).sum()
+        down_vol = v[down_days_mask].tail(10).sum()
+        if down_vol > 0:
+            vol_accumulation = up_vol > down_vol * 1.3
 
     # ── 12. Bollinger Band squeeze (volatility contraction) ───────────────────
-    if len(closes) >= 20:
-        bb_window = closes[-20:]
-        bb_mean   = sum(bb_window) / 20
-        bb_std    = math.sqrt(sum((x - bb_mean)**2 for x in bb_window) / 20)
-        bb_width  = (2 * bb_std / bb_mean) * 100 if bb_mean > 0 else 10
-        squeeze   = bb_width < 4.0  # tight Bollinger = compression before expansion
-    else:
-        squeeze = False
+    squeeze = False
+    if n >= 20: # Need at least 20 days for BB
+        bb_std = c.rolling(window=20).std()
+        bb_mean = c.rolling(window=20).mean()
+        bb_width = ((2 * bb_std) / bb_mean) * 100 # Percentage width
+        if bb_width.iloc[-1] < 4.0: # A common heuristic for a tight squeeze
+            squeeze = True
 
     return {
         "has_data": True, "n": n,
@@ -421,6 +372,30 @@ def get_hist_metrics(symbol: str) -> Dict:
         "squeeze":     squeeze,
         "triple_bottom": triple_bottom,
     }
+
+# ══════════════════════════════════════════════════════════════════════════════
+# DATA FETCHING
+# ══════════════════════════════════════════════════════════════════════════════
+
+def save_snapshot(raw: list):
+    """Persist today's live prices — uses open/high/low/close from intraday data."""
+    if not raw:
+        return
+    today = pkt_now().strftime("%Y-%m-%d")
+    conn  = sqlite3.connect(CFG["DB_PATH"])
+    rows  = []
+    for item in raw:
+        d = item.get("d", [])
+        if len(d) >= 25 and d[0]:
+            rows.append((
+                today, d[0],
+                safe(d[22]), safe(d[23]), safe(d[24]), safe(d[1]),
+                int(safe(d[3]))
+            ))
+    if rows:
+        conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA FETCHING
@@ -452,44 +427,23 @@ def fetch_live() -> list:
         st.error(f"⚡ Live data error: {e}")
         return []
 
-@st.cache_data(ttl=25, show_spinner=False)
-def fetch_breadth() -> Tuple[float, bool, int, int, dict]:
-    syms = list(set(KSE100 + ["KSE100","PKS100"]))
-    payload = {
-        "filter":  [{"left": "name", "operation": "in_range", "right": syms}],
-        "markets": ["pakistan"],
-        "columns": ["name","change","close","high","low","volume","RSI"],
-        "range":   [0, 500],
-    }
+def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
+    """Optimized: Calculates breadth from existing live data instead of second API call."""
+    chgs = []
+    adv, dec = 0, 0
     kse = {"close": 0.0, "change": 0.0, "high": 0.0, "low": 0.0, "volume": 0}
-    try:
-        r    = _session().post(TV_URL, json=payload, timeout=10)
-        data = r.json().get("data", [])
-        chgs, rsis = [], []
-        for item in data:
-            ticker = item.get("s", "").upper()
-            d = item.get("d", [])
-            if len(d) < 6: continue
-            name = safe(d[0], "")
-            chg  = safe(d[1])
-            cls  = safe(d[2])
-            if "KSE100" in ticker or "PKS100" in ticker or name == "KSE100":
-                kse = {"close": cls, "change": chg,
-                       "high": safe(d[3]), "low": safe(d[4]), "volume": safe(d[5])}
-            if name in KSE100 or ticker.split(":")[-1] in KSE100:
-                chgs.append(chg)
-                if len(d) > 6: rsis.append(safe(d[6]))
+    for item in raw:
+        d = item.get("d", [])
+        sym = d[0]
+        chg = safe(d[2])
+        if sym in KSE100:
+            chgs.append(chg)
+            if chg > 0: adv += 1
+            elif chg < 0: dec += 1
 
-        if not chgs:
-            return 0.0, False, 0, 0, kse
-
-        avg   = sum(chgs) / len(chgs)
-        adv   = sum(1 for c in chgs if c > 0)
-        dec   = sum(1 for c in chgs if c < 0)
-        bull  = avg > CFG["BREADTH_MIN"] and adv > dec
-        return avg, bull, adv, dec, kse
-    except Exception:
-        return 0.0, False, 0, 0, kse
+    avg = sum(chgs) / len(chgs) if chgs else 0.0
+    bull = avg > CFG["BREADTH_MIN"] and adv > dec
+    return avg, bull, adv, dec, kse
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_kse_index() -> Optional[dict]:
@@ -549,87 +503,13 @@ def score_intraday(
     if price <= vwap:                           return 0, [], 0, 0, 0   # must be above VWAP
     if rsi > 68:                                return 0, [], 0, 0, 0   # too hot - looking for new potential
 
-    # ── LAYER 1: TREND STRUCTURE ──────────────────────────────────────────────
-    # EMA alignment (price > EMA5 > EMA10 = maximum intraday alignment)
-    if ema5 > 0 and ema10 > 0:
-        if price > ema5 > ema10:
-            score += 4; reasons.append("EMA5>10 Fan")
-        elif price > ema5 and price > ema10:
-            score += 2; reasons.append("Above EMAs")
-        elif price > ema10:
-            score += 1
-
-    # ADX: trend strength (only trade strong trends intraday)
-    if adx >= 35:
-        score += 5; reasons.append(f"ADX {adx:.0f} Strong")
-    elif adx >= 25:
-        score += 3; reasons.append(f"ADX {adx:.0f}")
-    elif adx < 20:
-        score -= 2  # choppy market — scalps fail
-
-    # Candle structure: price position within today's range
-    day_range = high_d - low_d
-    if day_range > 0:
-        candle_pos = (price - low_d) / day_range
-        if candle_pos > 0.7:
-            score += 2; reasons.append("Day High Zone")
-        elif candle_pos < 0.3:
-            score -= 1  # buying near day low = risky
-
-    # Gap-up continuation
-    if open_p > 0 and price > open_p and change > 1.0:
-        score += 2; reasons.append("Gap Bull")
-
-    # ── LAYER 2: MOMENTUM CASCADE ─────────────────────────────────────────────
-    # MACD: histogram expanding = momentum accelerating
-    if macd > macd_sig:
-        if macd_hist > 0 and macd > 0:
-            score += 3; reasons.append("MACD↑ Bull")
-        else:
-            score += 1
-    elif macd < macd_sig:
-        score -= 1
-
-    # RSI: rising momentum in healthy zone
-    rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
-    if 52 < rsi < 72:
-        score += 2; reasons.append(f"RSI {rsi:.0f}")
-        if rsi_delta > 3:
-            score += 1; reasons.append("RSI Rising")
-    elif rsi < 50:
-        score -= 1
-    elif rsi >= 72:
-        score -= 2
-
-    # ── HIGH BETA BONUS ───────────────────────────────────────────────────────
-    if hist["volatility"] > 45:
-        score += 4
-        reasons.append("High Beta 🔥")
-
-    # Stochastic: confirm momentum but avoid crossover peaks
-    if stoch_k > stoch_d and 40 < stoch_k < 80:
-        score += 2; reasons.append("Stoch Bull")
-    elif stoch_k > 85:
-        score -= 1  # overbought Stoch
-
-    # Relative strength vs market
-    rs_alpha = change - mkt_chg
-    if rs_alpha > 1.5:
-        score += 3; reasons.append(f"RS +{rs_alpha:.1f}%")
-    elif rs_alpha > 0.5:
-        score += 1
-
     # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
     if vol_ratio >= CFG["INST_VOL_X"]:
         score += 7; reasons.append(f"🐋 {vol_ratio:.1f}x Inst.Vol")
     elif vol_ratio >= 2.0:
-        score += 4; reasons.append(f"{vol_ratio:.1f}x Vol")
+        score += 4; reasons.append(f"{vol_ratio:.1f}x Vol Behavior")
     elif vol_ratio >= 1.5:
         score += 2
-
-    # Volume accumulation from history
-    if hist["vol_accumulation"]:
-        score += 1; reasons.append("Vol Accumulation")
 
     # ── LAYER 4: PRICE PATTERN (VWAP ZONE) ───────────────────────────────────
     vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
@@ -637,8 +517,73 @@ def score_intraday(
         score += 6; reasons.append("🎯 VWAP Bounce")
     elif 0.5 <= vwap_dist < 1.2:
         score += 3; reasons.append("VWAP Edge")
-    elif vwap_dist > 3.0:
-        score -= 2  # too extended from VWAP — chasing
+
+    if hist["squeeze"] and change > 1.0:
+        score += 2; reasons.append("BB Squeeze Break")
+
+    # ── LAYER 1: TREND STRUCTURE ──────────────────────────────────────────────
+    if open_p > 0 and price > open_p and change > 1.0:
+        score += 2; reasons.append("Gap Bull")
+
+    if ema5 > 0 and ema10 > 0:
+        if price > ema5 > ema10:
+            score += 4; reasons.append("High Trend Quality")
+        elif price > ema5 and price > ema10:
+            score += 2; reasons.append("Above EMAs")
+
+    if adx >= 35:
+        score += 5; reasons.append(f"ADX {adx:.0f} Strong")
+    elif adx >= 25:
+        score += 3; reasons.append(f"ADX {adx:.0f}")
+
+    # ── LAYER 2: MOMENTUM CASCADE ─────────────────────────────────────────────
+    rs_alpha = change - mkt_chg
+    if rs_alpha > 1.5:
+        score += 3; reasons.append(f"RS +{rs_alpha:.1f}%")
+
+    if macd > macd_sig:
+        if macd_hist > 0 and macd > 0:
+            score += 3; reasons.append("MACD↑ Bull")
+
+    rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
+    if rsi < 40 and rsi_delta > 4:
+        score += 5; reasons.append("Oversold Momentum Turn")
+    elif 52 < rsi < 72:
+        score += 2; reasons.append(f"RSI {rsi:.0f}")
+        if rsi_delta > 3:
+            score += 1; reasons.append("Momentum Turn")
+
+    if stoch_k > stoch_d and 40 < stoch_k < 80:
+        score += 2; reasons.append("Stoch Turn")
+
+    if bb_basis > 0:
+        dist_basis = (price / bb_basis - 1) * 100
+        if 0 < dist_basis < 1.5:
+            score += 3; reasons.append("Mean-Rev Anchor")
+
+    day_range = high_d - low_d
+    if day_range > 0:
+        candle_pos = (price - low_d) / day_range
+        if candle_pos > 0.7:
+            score += 2; reasons.append("Day High Zone")
+
+    if hist["vol_accumulation"]:
+        score += 1; reasons.append("Vol Accumulation")
+
+    if hist["momentum"] > 0.5:
+        score += 1; reasons.append("Hist Mom↑")
+
+    if hist["volatility"] > 45:
+        score += 4; reasons.append("High Beta 🔥")
+
+    # ── PENALTIES & CONTEXT ──────────────────────────────────────────────────
+    if adx < 20: score -= 2
+    if day_range > 0 and (price - low_d) / day_range < 0.3: score -= 1
+    if macd < macd_sig: score -= 1
+    if rsi < 50: score -= 1
+    elif rsi >= 72: score -= 2
+    if stoch_k > 85: score -= 1
+    if vwap_dist > 3.0: score -= 2
 
     # Bollinger Bands: position within bands
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
@@ -704,52 +649,68 @@ def score_swing(
     if rsi > 65:                                return 0, [], 0, 0, 0  # no chasing overbought stocks
     if adx < 15:                                return 0, [], 0, 0, 0  # no trend = no swing
 
+    # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
+    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
+    if vol_ratio >= 2.5:
+        score += 4; reasons.append(f"🐋 {vol_ratio:.1f}x Vol")
+    elif vol_ratio >= 1.7:
+        score += 2; reasons.append(f"{vol_ratio:.1f}x Vol Behavior")
+
+    if hist["squeeze"]:
+        score += 5; reasons.append("BB Squeeze")
+
+    # ── LAYER 4: PRICE PATTERN ────────────────────────────────────────────────
+    if high1m > low1m > 0:
+        range1m = high1m - low1m
+        pos1m   = (price - low1m) / range1m
+        if 0.08 < pos1m < 0.30:
+            score += 4; reasons.append("🎯 Early Cycle")
+
+    if hist["support_level"] > 0 and price > 0:
+        support_gap = (price / hist["support_level"] - 1) * 100
+        if 0 < support_gap < 4:
+            score += 2; reasons.append("Mean-Rev Distance ✓")
+
+    if bb_basis > 0:
+        dist_basis = (price / bb_basis - 1) * 100
+        if -1 < dist_basis < 2:
+            score += 3; reasons.append("Mean-Rev Anchor")
+
     # ── LAYER 1: TREND STRUCTURE ──────────────────────────────────────────────
-    # Perfect EMA fan: price > EMA5 > EMA10 > EMA20 > EMA50
     if ema5 > 0 and price > ema5 > ema10 > ema20 > ema50:
-        score += 10; reasons.append("⭐ Perfect EMA Fan")
+        score += 10; reasons.append("High Trend Quality")
     elif price > ema10 > ema20 > ema50:
         score += 7; reasons.append("EMA Fan")
-    elif price > ema20 > ema50:
-        score += 4; reasons.append("EMA Rising")
-    elif price > ema50:
-        score += 1; reasons.append("Above EMA50")
 
-    # EMA slopes (are they rising?)
-    if hist["ema10_slope"] > 0.3:
-        score += 2; reasons.append("EMA10 Rising")
-    elif hist["ema10_slope"] < -0.5:
-        score -= 2
-
-    # Higher lows pattern (structural uptrend)
     if hist["higher_lows"]:
         score += 3; reasons.append("Higher Lows ✓")
 
-    # ADX: need a real trend for swing
     if adx >= 30:
         score += 5; reasons.append(f"ADX {adx:.0f}")
-    elif adx >= 22:
-        score += 2
-    elif adx < 18:
-        score -= 1
 
     # ── LAYER 2: MOMENTUM CASCADE ─────────────────────────────────────────────
-    # RSI: sweet spot 45–65 = room to run without being overbought
+    rs_alpha = change - mkt_chg
+    if rs_alpha > 1.0:
+        score += 2; reasons.append(f"RS +{rs_alpha:.1f}%")
+
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
-    if 45 < rsi < 60:
+    if rsi < 42 and rsi_delta > 3:
+        score += 5; reasons.append("Oversold Momentum Turn")
+    elif 45 < rsi < 60:
         score += 4; reasons.append(f"RSI {rsi:.0f} Ideal")
-    elif 60 <= rsi < 68:
-        score += 2; reasons.append(f"RSI {rsi:.0f}")
-    elif 38 < rsi <= 45:
-        score += 2; reasons.append(f"RSI Reset {rsi:.0f}")  # pullback entry
 
-    # RSI divergence: price rising, RSI also rising = confirmed
-    if rsi_delta > 2 and change > 0:
-        score += 2; reasons.append("RSI Divergence+")
-    elif rsi_delta < -3 and change > 0:
-        score -= 2; reasons.append("⚠️ RSI Div-")  # bearish divergence
+    if macd > macd_sig and macd_hist > 0:
+        score += 3; reasons.append("Momentum Turn")
 
-    # ── HIGH BETA BONUS ───────────────────────────────────────────────────────
+    if hist["ema10_slope"] > 0 and hist["ema20_slope"] > 0:
+        score += 3; reasons.append("Trend Quality+")
+
+    if hist["vol_accumulation"]:
+        score += 2; reasons.append("Accumulation")
+
+    if hist["momentum"] > 1.0:
+        score += 2; reasons.append("Hist Mom↑")
+
     if hist["volatility"] > 45:
         score += 5
         reasons.append("High Beta 🔥")
@@ -902,61 +863,64 @@ def score_longterm(
 
     # ── LAYER 1: SECTOR & FUNDAMENTAL QUALITY ─────────────────────────────────
     if quality == 9:
-        score += 5; reasons.append(f"⭐⭐ {sector}")
+        score += 5
     elif quality == 8:
-        score += 4; reasons.append(f"⭐ {sector}")
+        score += 4
     elif quality == 7:
-        score += 3; reasons.append(f"{sector}")
+        score += 3
     else:
         score += 1
 
     # ── LAYER 2: VALUE ZONE DETECTION ─────────────────────────────────────────
     if high1m > low1m > 0:
         dist_low = (price / low1m - 1) * 100
-        pos1m    = (price - low1m) / (high1m - low1m)
-
-        # Double-bottom / accumulation near lows
         if hist["triple_bottom"] and dist_low < 5:
             score += 12; reasons.append("🧱 Triple Bottom")
         elif 0.3 < dist_low < 4 and rsi > 28:
             score += 6; reasons.append("🔄 Double Bottom")
         elif dist_low < 10:
             score += 4; reasons.append("💰 Value Zone")
-        elif dist_low < 20:
-            score += 2; reasons.append("Moderate Value")
 
-        if pos1m < 0.20:
-            score += 3; reasons.append("Lower Quartile")
-        elif pos1m < 0.40:
-            score += 1
+    if bb_basis > 0:
+        dist_basis = (price / bb_basis - 1) * 100
+        if dist_basis < 0: # Price below mean
+            score += 5; reasons.append("Mean-Rev Discount")
 
-    # Historical support level
     if hist["support_level"] > 0 and price > 0:
         gap = (price / hist["support_level"] - 1) * 100
         if 0 < gap < 3:
-            score += 3; reasons.append("At Support")
-        elif -2 < gap <= 0:
-            score -= 2  # just below support — watch
+            score += 3; reasons.append("Mean-Rev Distance ✓")
+
+    # ── LAYER 5: VOLUME PATTERN ──────────────────────────────────────────────
+    if hist["vol_accumulation"]:
+        score += 3; reasons.append("Vol Behavior Acc.")
+
+    # ── LAYER 4: TREND INFRASTRUCTURE ────────────────────────────────────────
+    if price > ema50:
+        score += 3; reasons.append("Above EMA50")
+    if hist["ema20_slope"] > 0:
+        score += 2; reasons.append("Trend Quality+")
+    if hist["higher_lows"]:
+        score += 3; reasons.append("Higher Lows ✓")
 
     # ── LAYER 3: REVERSAL MOMENTUM ────────────────────────────────────────────
-    # RSI: want oversold recovery, not deep in the hole
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if 20 < rsi < 35:
-        score += 4; reasons.append(f"RSI {rsi:.0f} Oversold")
+        score += 4; reasons.append("Oversold Momentum")
     elif 40 <= rsi < 50:
         score += 3; reasons.append(f"RSI {rsi:.0f} Reset")
     elif 50 <= rsi < 60:
         score += 1
 
     if rsi_delta > 3:
-        score += 2; reasons.append("RSI Turning Up")
+        score += 2; reasons.append("Momentum Turn")
 
     # Stochastic oversold recovery
     if stoch_k > stoch_d and stoch_k < 50:
         score += 2; reasons.append("Stoch Recovery")
 
     # MACD turning (histogram improving)
-    if macd_hist > 0 and macd_hist > 0:
+    if macd_hist > 0:
         score += 2; reasons.append("MACD Hist+")
     elif macd > macd_sig:
         score += 1
@@ -1040,6 +1004,9 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 
     intra, swing, long_ = [], [], []
 
+    # Open DB connection once for the entire processing loop
+    conn = sqlite3.connect(CFG["DB_PATH"])
+
     for item in raw:
         d = item.get("d", [])
         # Need at least the core 27 cols (rest are optional)
@@ -1081,7 +1048,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             continue
 
         sector = SYM_SECTOR.get(sym, "Misc")
-        hist   = get_hist_metrics(sym)
+        hist = get_hist_metrics(sym, conn)
 
         # Minimum liquidity: both absolute floor AND 30% of historical average
         if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
@@ -1101,7 +1068,8 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 "Price": round(price, 2), "Chg%": round(change, 2),
                 "Score": sc, "Prev": p_sc,
                 "RV": round(rv, 1),
-                "ADX": round(adx, 0),
+                "RSI": round(rsi, 0),
+                "Reasons": " · ".join(rs),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
@@ -1121,7 +1089,8 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 "Price": round(price, 2), "Chg%": round(change, 2),
                 "Score": sc, "Prev": p_sc,
                 "1W%": round(chg1w, 2),
-                "ADX": round(adx, 0),
+                "Reasons": " · ".join(rs[:2]),
+                "RSI": round(rsi, 0),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
@@ -1142,114 +1111,15 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 "Score": sc, "Prev": p_sc,
                 "1M%": round(perf1m, 2),
                 "Stab": round(hist["stability"], 1),
+                "RSI": round(rsi, 0),
+                "Reasons": " · ".join(rs[:2]),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
 
+    conn.close()
     srt = lambda lst: pd.DataFrame(lst).sort_values("Score", ascending=False).reset_index(drop=True) if lst else pd.DataFrame()
     return srt(intra), srt(swing), srt(long_)
-
-# ══════════════════════════════════════════════════════════════════════════════
-# POSITION TRACKER — real-time hold/exit guidance
-# ══════════════════════════════════════════════════════════════════════════════
-
-def position_status(symbol: str, entry: float, raw: list) -> Optional[dict]:
-    match = next((item for item in raw if item.get("d", [None])[0] == symbol), None)
-    if not match:
-        return None
-    d = match["d"]
-    curr      = safe(d[1])
-    vol       = safe(d[3])
-    avg_vol   = safe(d[5])
-    rsi       = safe(d[6], 50)
-    macd      = safe(d[7])
-    macd_sig  = safe(d[8])
-    ema20     = safe(d[11])
-    ema50     = safe(d[12])
-    ema10     = safe(d[17])
-    adx       = safe(d[18])
-    atr       = safe(d[19])
-    stoch_k   = safe(d[20], 50)
-    bb_low    = safe(d[9])
-    bb_high   = safe(d[10])
-    bb_basis  = safe(d[30]) if len(d) > 30 else (bb_low + bb_high) / 2
-    rv        = vol / avg_vol if avg_vol > 0 else 1.0
-
-    pnl_pct = (curr - entry) / entry * 100
-    pnl_amt = curr - entry
-
-    signals = []
-    action  = "🟢 HOLD"
-    conf    = "Medium"
-
-    # Trail stop based on ATR
-    trail_stop = round(curr - 1.5 * atr, 2) if atr > 0 else round(curr * 0.95, 2)
-    bb_pos     = _bb_position(curr, bb_low, bb_high, bb_basis)
-
-    # ── EXIT SIGNALS (priority order) ─────────────────────────────────────────
-    if pnl_pct < -9:
-        signals.append("🛑 Hard stop triggered — exit all immediately")
-        action = "🔴 EXIT NOW"; conf = "Critical"
-
-    elif curr < ema50 and pnl_pct < -3:
-        signals.append("❌ Below EMA50 — major trend broken")
-        action = "🔴 EXIT"; conf = "High"
-
-    elif curr < ema20 and curr < ema10 and macd < macd_sig:
-        signals.append("❌ EMA stack broken + MACD bear")
-        action = "🔴 EXIT"; conf = "High"
-
-    elif rsi > 78 and rv < 0.8 and bb_pos > 0.90:
-        signals.append("🚨 RSI extreme + volume drying + BB upper")
-        action = "🔴 EXIT"; conf = "High"
-
-    elif pnl_pct > 18:
-        signals.append("🎯 Target exceeded — book 80%, trail rest")
-        action = "🟡 SCALE OUT"; conf = "High"
-
-    elif pnl_pct > 10:
-        signals.append(f"💰 Strong profit — book 50%, move stop to {trail_stop:.2f}")
-        action = "🟡 PARTIAL EXIT"; conf = "High"
-
-    elif pnl_pct > 5 and (rsi > 72 or bb_pos > 0.85):
-        signals.append("⚠️ Profit + overbought signals — book 30%")
-        action = "🟡 TRIM"
-
-    elif macd < macd_sig and adx < 20 and stoch_k < stoch_k:
-        signals.append("📉 MACD bear + weakening ADX + Stoch down")
-        if pnl_pct > 3:
-            action = "🟡 PARTIAL EXIT"
-
-    elif pnl_pct < -5 and adx < 18 and curr < ema20:
-        signals.append("⚠️ Loss + no trend + below EMA20")
-        action = "🔴 EXIT"
-
-    # ── HOLD SIGNALS ─────────────────────────────────────────────────────────
-    if not signals:
-        hold_signals = []
-        if adx > 25 and curr > ema20:
-            hold_signals.append(f"✅ Trend strong (ADX {adx:.0f})")
-            conf = "High"
-        if macd > macd_sig:
-            hold_signals.append("✅ MACD bullish")
-        if 45 < rsi < 70:
-            hold_signals.append(f"✅ RSI healthy ({rsi:.0f})")
-        if not hold_signals:
-            hold_signals.append("⏳ Position developing — monitor EMA20")
-        signals = hold_signals
-
-    # Add ATR trail stop suggestion
-    if action == "🟢 HOLD" and pnl_pct > 2:
-        signals.append(f"📌 Trail stop: {trail_stop:.2f}")
-
-    return {
-        "symbol": symbol, "entry": entry, "current": curr,
-        "pnl_pct": pnl_pct, "pnl_amt": pnl_amt,
-        "rsi": rsi, "rv": rv, "adx": adx,
-        "action": action, "signals": signals[:4], "confidence": conf,
-        "trail_stop": trail_stop,
-    }
-
 # ══════════════════════════════════════════════════════════════════════════════
 # UI — STREAMLIT
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1266,27 +1136,6 @@ st.markdown("""
 html, body, [class*="css"] { background: #060b18 !important; color: #e2e8f0 !important; }
 footer, #MainMenu { visibility: hidden; }
 
-.hdr {
-    background: linear-gradient(135deg, rgba(10,18,38,0.98) 0%, rgba(6,11,24,1) 100%);
-    border: 1px solid rgba(255,255,255,0.07); border-radius: 20px;
-    padding: 1.75rem 2.2rem; margin-bottom: 1.5rem;
-    box-shadow: 0 32px 80px rgba(0,0,0,0.7), inset 0 1px 0 rgba(255,255,255,0.05);
-}
-.hdr-title {
-    font-size: 2.3rem; font-weight: 900; letter-spacing: -0.04em;
-    background: linear-gradient(135deg, #00ff88 0%, #00d4ff 45%, #7c3aed 100%);
-    -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-    margin-bottom: 0.45rem;
-}
-.hdr-sub {
-    font-family: 'JetBrains Mono', monospace; font-size: 0.76rem;
-    color: #3d5166; display: flex; gap: 1.2rem; flex-wrap: wrap; align-items: center;
-}
-.hdr-pill {
-    background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.2);
-    color: #10b981; border-radius: 20px; padding: 2px 10px; font-size: 0.68rem; font-weight: 700;
-}
-
 .badge {
     display: inline-block; padding: 0.3rem 0.85rem; border-radius: 8px;
     font-size: 0.68rem; font-weight: 700; letter-spacing: 0.06em; border: 1px solid;
@@ -1297,46 +1146,14 @@ footer, #MainMenu { visibility: hidden; }
 .b-bear   { border-color:#ef4444; color:#ef4444; background:rgba(239,68,68,0.12); }
 .b-neut   { border-color:#f59e0b; color:#f59e0b; background:rgba(245,158,11,0.10); }
 
-.idx-bar {
-    background: rgba(10,18,38,0.7); border: 1px solid rgba(255,255,255,0.06);
-    border-radius: 16px; padding: 1.3rem 1.75rem; margin-bottom: 1.5rem;
-}
-
 .sec-wrap { display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:1rem; }
 .sec-tile {
-    background: rgba(10,18,38,0.8); border: 1px solid rgba(255,255,255,0.07);
-    border-radius: 8px; padding: 4px 11px;
+    background: #1e293b; border: 1px solid #334155;
+    border-radius: 4px; padding: 2px 8px;
     display:flex; align-items:center; gap:7px;
 }
 .sec-name { font-size:0.7rem; font-weight:500; color:#64748b; }
 .sec-val  { font-family:'JetBrains Mono',monospace; font-size:0.76rem; font-weight:700; }
-
-.sc {
-    background: linear-gradient(155deg, rgba(10,18,38,0.75) 0%, rgba(6,11,24,0.9) 100%);
-    border: 1px solid rgba(255,255,255,0.06); border-radius: 16px;
-    padding: 1.5rem; margin-bottom: 1.6rem;
-    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-}
-.sc-hdr { font-size:1.15rem; font-weight:800; margin-bottom:0.35rem; letter-spacing:-0.01em; }
-.sc-sub { font-size:0.76rem; color:#4b5563; margin-bottom:1rem; }
-.sc-stats { display:flex; gap:1.5rem; margin-bottom:1rem; }
-.sc-stat { font-size:0.72rem; color:#64748b; }
-.sc-stat span { color:#94a3b8; font-weight:600; font-family:'JetBrains Mono',monospace; }
-
-.pos-card {
-    background: linear-gradient(135deg, rgba(17,24,39,0.95) 0%, rgba(10,14,26,0.98) 100%);
-    border: 1px solid rgba(30,41,59,0.8); border-radius: 13px; padding: 1.1rem;
-    margin-bottom: 0.5rem; transition: border-color 0.2s, box-shadow 0.2s;
-}
-.pos-card:hover { border-color:#2d4a6b; box-shadow: 0 4px 20px rgba(59,130,246,0.1); }
-.pnl-pos { color:#10b981 !important; font-weight:800; }
-.pnl-neg { color:#ef4444 !important; font-weight:800; }
-
-.cb { display:inline-block; padding:0.2rem 0.6rem; border-radius:6px;
-      font-size:0.62rem; font-weight:700; letter-spacing:0.06em; border:1px solid; }
-.cb-high     { background:rgba(16,185,129,0.1);  color:#10b981; border-color:rgba(16,185,129,0.3); }
-.cb-critical { background:rgba(239,68,68,0.1);   color:#ef4444; border-color:rgba(239,68,68,0.3); }
-.cb-medium   { background:rgba(245,158,11,0.08); color:#f59e0b; border-color:rgba(245,158,11,0.25); }
 
 [data-testid="stDataFrame"] { background:transparent !important; border-radius:10px; overflow:hidden; }
 thead tr th {
@@ -1348,12 +1165,13 @@ thead tr th {
 tbody tr:nth-child(even) { background:rgba(10,18,38,0.3) !important; }
 tbody tr:hover { background:rgba(30,58,100,0.2) !important; }
 
-.stButton>button {
-    background:linear-gradient(135deg,#2563eb,#1d4ed8); color:#fff;
-    border:none; border-radius:9px; font-weight:700; font-size:0.88rem;
-    transition:all 0.2s; letter-spacing:0.01em;
+.stButton button {
+    background: transparent !important; border: none !important;
+    box-shadow: none !important; color: #64748b !important;
+    padding: 0 !important; font-size: 1.2rem !important;
+    min-height: unset !important; line-height: 1 !important;
 }
-.stButton>button:hover { transform:translateY(-1px); box-shadow:0 6px 20px rgba(37,99,235,0.45); }
+.stButton button:hover { color: #f8fafc !important; }
 
 .stTextInput>div>div>input, .stNumberInput>div>div>input {
     background:rgba(6,11,24,0.8) !important; border:1px solid rgba(51,65,85,0.6) !important;
@@ -1388,104 +1206,49 @@ hr { border-color:rgba(30,41,59,0.4) !important; margin: 1.5rem 0 !important; }
 # ─── Init ────────────────────────────────────────────────────────────────────
 init_db()
 
-# ─── Sidebar ─────────────────────────────────────────────────────────────────
-with st.sidebar:
-    st.markdown("### 🛠️ Data Engine")
-    if st.button("🔄 Sync 90-Day OHLCV", use_container_width=True,
-                 help="Downloads full OHLCV from Yahoo Finance — run once per session"):
-        sync_historical_data()
-        st.rerun()
-    st.caption("Powers 12 historical metrics: ATR, support/resistance, higher-lows, BB squeeze, volume accumulation, momentum, and more.")
-
-    st.divider()
-    st.markdown("###  Signal Guide")
-    st.markdown("""
-| Score | Quality |
-|---|---|
-| 90%+ max | 🔥 Elite |
-| 70–89%   | ✅ Strong |
-| 50–69%   | ⚡ Good |
-| < 50%    | ⚠️ Weak |
-""")
-
 # ─── Market State ─────────────────────────────────────────────────────────────
 is_open = is_market_open()
-now_str = pkt_now().strftime("%H:%M PKT · %a %d %b %Y")
-
-avg_chg, bullish, adv, dec, kse_fb = fetch_breadth()
+raw_data = fetch_live()
+avg_chg, bullish, adv, dec, kse_fb = calculate_breadth_from_raw(raw_data)
 kse_api = fetch_kse_index()
 
 def _kse(key, fb):
     return kse_api.get(key, fb) if kse_api else fb
 
 idx_close = _kse("close",         kse_fb["close"])
-idx_abs   = _kse("change",        0)
 idx_pct   = _kse("changePercent", kse_fb["change"])
-idx_high  = _kse("high",          kse_fb["high"])
-idx_low   = _kse("low",           kse_fb["low"])
 idx_vol   = _kse("volume",        kse_fb["volume"])
 
-idx_col  = "#10b981" if idx_pct >= 0 else "#ef4444"
 bclass   = "b-bull" if bullish else ("b-bear" if avg_chg < -0.5 else "b-neut")
-btext    = f"{'BULLISH' if bullish else 'BEARISH'} {avg_chg:+.2f}%"
-mclass   = "b-open" if is_open else "b-closed"
-mtext    = "● LIVE" if is_open else "● CLOSED"
 vol_cr   = idx_vol / 1e7
 
-# ─── Header ──────────────────────────────────────────────────────────────────
-st.markdown(f"""
-<div class="hdr">
-  <div class="hdr-title">⚡ PSX Elite Institutional Scanner</div>
-  <div class="hdr-sub">
-    <span class="hdr-pill">7-Layer Signal Engine</span>
-    <span>KSE-100 · Live + Historical Intelligence · Pattern Detection</span>
-    <span style="margin-left:auto; color:#2d4a6b;">{now_str}</span>
-  </div>
-</div>""", unsafe_allow_html=True)
 
-# ─── KSE-100 Index Bar ────────────────────────────────────────────────────────
-adv_ratio = adv / (adv + dec) * 100 if (adv + dec) > 0 else 50
-st.markdown(f"""
-<div class="idx-bar">
-  <div style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;margin-bottom:1rem;">
-    <span class="badge {mclass}">{mtext}</span>
-    <span class="badge {bclass}">{btext}</span>
-    <span style="color:#10b981;font-weight:800;font-family:'JetBrains Mono';font-size:0.82rem;margin-left:6px;">▲ {adv}</span>
-    <span style="color:#ef4444;font-weight:800;font-family:'JetBrains Mono';font-size:0.82rem;">▼ {dec}</span>
-    <span style="color:#64748b;font-size:0.72rem;margin-left:4px;">A/D {adv_ratio:.0f}%</span>
-  </div>
-  <div style="display:flex;flex-wrap:wrap;gap:2.5rem;align-items:flex-end;">
-    <div>
-      <div style="font-size:0.68rem;color:#334155;text-transform:uppercase;font-weight:700;margin-bottom:3px;letter-spacing:0.08em;">KSE-100 Index</div>
-      <div style="font-size:2.4rem;font-weight:900;color:#f8fafc;line-height:1;font-family:'JetBrains Mono';">{idx_close:,.0f}</div>
-      <div style="font-size:1.05rem;font-weight:700;color:{idx_col};margin-top:5px;">
-        {f"{idx_abs:+,.0f} " if idx_abs else ""}({idx_pct:+.2f}%)
-      </div>
-    </div>
-    <div style="display:flex;gap:2rem;padding-left:2rem;border-left:1px solid rgba(255,255,255,0.06);">
-      <div><div style="color:#2d4a6b;font-size:0.64rem;text-transform:uppercase;margin-bottom:3px;">High</div>
-           <div style="font-weight:700;color:#cbd5e1;font-family:'JetBrains Mono';">{idx_high:,.0f}</div></div>
-      <div><div style="color:#2d4a6b;font-size:0.64rem;text-transform:uppercase;margin-bottom:3px;">Low</div>
-           <div style="font-weight:700;color:#cbd5e1;font-family:'JetBrains Mono';">{idx_low:,.0f}</div></div>
-      <div><div style="color:#2d4a6b;font-size:0.64rem;text-transform:uppercase;margin-bottom:3px;">Volume</div>
-           <div style="font-weight:700;color:#cbd5e1;font-family:'JetBrains Mono';">{vol_cr:.2f} Cr</div></div>
-    </div>
-  </div>
-</div>""", unsafe_allow_html=True)
+c_title, c_btns = st.columns([6, 1])
+with c_title:
+    st.markdown("<h3 style='margin:0; padding:0;'>PSX Scanner</h3>", unsafe_allow_html=True)
+with c_btns:
+    bc1, bc2 = st.columns([1, 1])
+    scan_btn = bc1.button("🔍", help="Scan Now")
+    sync_btn = bc2.button("🔄", help="Sync History")
+    if sync_btn:
+        sync_historical_data(KSE100)
+        st.rerun()
+
+m1, m2, m3, m4 = st.columns(4)
+with m1:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>KSE-100</div><div style='font-size:1.1rem; font-weight:700;'>{idx_close:,.0f} <span style='font-weight:400; color:{'#10b981' if idx_pct >= 0 else '#ef4444'}; font-size:0.85rem;'>{idx_pct:+.2f}%</span></div>", unsafe_allow_html=True)
+with m2:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market State</div><div style='font-size:1.1rem; font-weight:700;'>{'LIVE' if is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
+with m3:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>A/D Ratio</div><div style='font-size:1.1rem; font-weight:700;'>{adv} ▲ / {dec} ▼</div>", unsafe_allow_html=True)
+with m4:
+    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market Volume</div><div style='font-size:1.1rem; font-weight:700;'>{vol_cr:.1f} Cr</div>", unsafe_allow_html=True)
 
 # ─── Market breadth warning ───────────────────────────────────────────────────
 if not bullish:
     st.markdown(f'<div class="alert-box">⚠️ <strong>Bearish Breadth</strong> — Market declining ({adv} advancers vs {dec} decliners). Reduce position sizes. Intraday setups require extra confirmation.</div>', unsafe_allow_html=True)
 
-# ─── Scan Trigger ─────────────────────────────────────────────────────────────
-scan = is_open
-if not is_open:
-    col_btn, col_info = st.columns([1, 3])
-    with col_btn:
-        if st.button("🔍 Manual Scan", use_container_width=True):
-            scan = True
-    with col_info:
-        st.markdown('<div class="info-box" style="margin-top:0.25rem;">Market closed — VWAP-based intraday signals use last close. Swing & Long-term remain fully valid.</div>', unsafe_allow_html=True)
+scan = is_open or scan_btn
 
 if scan:
     with st.spinner("🔬 Scanning KSE-100 across 7 signal layers…"):
@@ -1513,7 +1276,7 @@ if scan:
         q    = SECTORS[sec]["quality"]
         tiles += f'<div class="sec-tile"><span class="sec-name">{html.escape(sec)}</span><span class="sec-val" style="color:{col};">{avg:+.1f}%</span></div>'
 
-    st.markdown(f'<div style="font-size:0.72rem;color:#334155;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;">Sector Heatmap</div><div class="sec-wrap">{tiles}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="sec-wrap">{tiles}</div>', unsafe_allow_html=True)
 
     # ── Run Signals ───────────────────────────────────────────────────────────
     df_i, df_s, df_l = process_signals(raw, bullish, avg_chg)
@@ -1524,7 +1287,7 @@ if scan:
 
     def render_table(df: pd.DataFrame, col_cfg: dict, score_max: int):
         if df.empty:
-            st.markdown('<div style="color:#334155;font-size:0.85rem;padding:0.75rem;">🔍 No setups meet current threshold. Try lowering the slider in the sidebar.</div>', unsafe_allow_html=True)
+            st.write("No setups meet current threshold.")
         else:
             # Add score% column
             # Only show top Elite stocks
@@ -1532,181 +1295,48 @@ if scan:
             st.dataframe(df_top, column_config=col_cfg, hide_index=True, use_container_width=True)
 
     # ── INTRADAY ──────────────────────────────────────────────────────────────
-    st.markdown(f"""<div class="sc">
-      <div class="sc-hdr">⚡ <span style="color:#fbbf24;">INTRADAY</span> SCALPS</div>
-      <div class="sc-sub">Same-day exits · VWAP anchor · Institutional volume · ATR stops · EMA5/10 alignment</div>
-      <div class="sc-stats">
-        <div class="sc-stat">Results: <span>{len(df_i)}</span></div>
-        <div class="sc-stat">Threshold: <span>{thresh_i}/{30}</span></div>
-        <div class="sc-stat">Breadth: <span style="color:{'#10b981' if bullish else '#ef4444'}">{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></div>
-      </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<div style='margin-top:1rem; margin-bottom:5px;'><b>INTRADAY SCALPS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_i)} &nbsp; Threshold: {thresh_i}/30 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
+
     render_table(df_i, {
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score",  help="Today's Institutional Score"),
         "Prev":   st.column_config.NumberColumn("Prev",   help="Yesterday's Score"),
         "RV":     st.column_config.NumberColumn("RV",     format="%.1fx"),
+        "RSI":    st.column_config.NumberColumn("RSI",    format="%d"),
+        "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
     }, score_max=30)
-    st.markdown("</div>", unsafe_allow_html=True)
 
     # ── SWING ────────────────────────────────────────────────────────────────
-    st.markdown(f"""<div class="sc">
-      <div class="sc-hdr">🚀 <span style="color:#3b82f6;">SWING</span> TRADES</div>
-      <div class="sc-sub">3–7 day holds · EMA fan · Cycle position · Volume accumulation · BB squeeze · Support proximity</div>
-      <div class="sc-stats">
-        <div class="sc-stat">Results: <span>{len(df_s)}</span></div>
-        <div class="sc-stat">Threshold: <span>{thresh_s}/{36}</span></div>
-        <div class="sc-stat">Breadth: <span style="color:{'#10b981' if bullish else '#ef4444'}">{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></div>
-      </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>SWING TRADES</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_s)} &nbsp; Threshold: {thresh_s}/36 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
+
     render_table(df_s, {
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
         "Prev":   st.column_config.NumberColumn("Prev"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
+        "RSI":    st.column_config.NumberColumn("RSI",    format="%d"),
+        "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
     }, score_max=36)
-    st.markdown("</div>", unsafe_allow_html=True)
 
     # ── LONG-TERM ────────────────────────────────────────────────────────────
-    st.markdown(f"""<div class="sc">
-      <div class="sc-hdr">💎 <span style="color:#10b981;">LONG-TERM</span> INVESTMENTS</div>
-      <div class="sc-sub">Multi-week holds · Sector quality · Double bottoms · Wyckoff accumulation · RSI recovery · BB value</div>
-      <div class="sc-stats">
-        <div class="sc-stat">Results: <span>{len(df_l)}</span></div>
-        <div class="sc-stat">Threshold: <span>{thresh_l}/{35}</span></div>
-        <div class="sc-stat">Focus: <span>Banks ⭐ · E&P ⭐ · Fertilizer ⭐</span></div>
-      </div>
-    """, unsafe_allow_html=True)
+    st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>LONG-TERM INVESTMENTS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_l)} &nbsp; Threshold: {thresh_l}/35</span></div>", unsafe_allow_html=True)
+
     render_table(df_l, {
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
         "Prev":   st.column_config.NumberColumn("Prev"),
         "1M%":    st.column_config.NumberColumn("1M%",    format="%.2f%%"),
         "Stab":   st.column_config.NumberColumn("Stab",   format="%.1f"),
+        "RSI":    st.column_config.NumberColumn("RSI",    format="%d"),
+        "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
     }, score_max=35)
     st.markdown("</div>", unsafe_allow_html=True)
-
-# ── POSITION TRACKER ──────────────────────────────────────────────────────────
-st.divider()
-st.markdown("### 📊 Position Tracker")
-c1, c2, c3, c4 = st.columns([2, 2, 1, 1])
-with c1:
-    sym_in = st.text_input("Symbol", placeholder="HBL, LUCK, PPL…", key="ps").strip().upper()
-with c2:
-    entry_in = st.number_input("Entry Price", min_value=0.0, step=0.01, key="pe")
-with c3:
-    qty_in = st.number_input("Qty (shares)", min_value=0, step=100, key="pq")
-with c4:
-    st.write("")
-    if st.button("➕ Add", use_container_width=True):
-        if sym_in and entry_in > 0:
-            st.session_state.positions.append({"symbol": sym_in, "entry": entry_in, "qty": qty_in or 0})
-            st.success(f"Added {sym_in} @ {entry_in:.2f}")
-            st.rerun()
-
-if st.session_state.positions:
-    pos_raw = fetch_live()
-    for idx, pos in enumerate(st.session_state.positions):
-        status = position_status(pos["symbol"], pos["entry"], pos_raw)
-        if not status:
-            st.warning(f"{pos['symbol']} — no live data found")
-            continue
-
-        qty     = pos.get("qty", 0)
-        pnl_cls = "pnl-pos" if status["pnl_pct"] > 0 else "pnl-neg"
-        ck      = status["confidence"].lower()
-        cb_cls  = "cb-critical" if ck == "critical" else ("cb-high" if ck == "high" else "cb-medium")
-        total_pnl = status["pnl_amt"] * qty if qty > 0 else None
-
-        ca, cb_, cc = st.columns([2, 4, 1])
-        with ca:
-            total_str = f'<div style="font-size:0.75rem;color:#10b981 !important;">PKR {total_pnl:+,.0f} total</div>' if total_pnl else ""
-            st.markdown(f"""<div class="pos-card">
-              <div style="font-size:1.35rem;font-weight:900;font-family:'JetBrains Mono';">{status['symbol']}</div>
-              <div style="font-size:0.74rem;color:#334155;margin:0.25rem 0;">{status['entry']:.2f} → <strong style="color:#94a3b8;">{status['current']:.2f}</strong></div>
-              <div style="font-size:1.2rem;font-weight:800;font-family:'JetBrains Mono';" class="{pnl_cls}">{status['pnl_pct']:+.2f}%</div>
-              <div style="font-size:0.75rem;color:#475569;">PKR {status['pnl_amt']:+.2f}/share</div>
-              {total_str}
-            </div>""", unsafe_allow_html=True)
-        with cb_:
-            bullets = "".join(f'<div style="margin-bottom:4px;font-size:0.8rem;">• {s}</div>' for s in status["signals"])
-            st.markdown(f"""<div class="pos-card">
-              <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:0.65rem;">
-                <div style="font-size:0.98rem;font-weight:800;">{status['action']}</div>
-                <span class="cb {cb_cls}">{status['confidence'].upper()}</span>
-              </div>
-              <div style="color:#94a3b8;line-height:1.7;">{bullets}</div>
-              <div style="margin-top:0.65rem;padding-top:0.65rem;border-top:1px solid rgba(30,41,59,0.5);
-                          font-size:0.7rem;color:#334155;font-family:'JetBrains Mono';">
-                RSI {status['rsi']:.0f} · Vol {status['rv']:.1f}x · ADX {status['adx']:.0f} · Trail {status['trail_stop']:.2f}
-              </div>
-            </div>""", unsafe_allow_html=True)
-        with cc:
-            st.write("")
-            if st.button("🗑️ Remove", key=f"del_{idx}", use_container_width=True):
-                st.session_state.positions.pop(idx); st.rerun()
-
-# ── METHODOLOGY ───────────────────────────────────────────────────────────────
-st.divider()
-with st.expander("📖 Signal Methodology & Risk Framework", expanded=False):
-    m1, m2 = st.columns(2)
-    with m1:
-        st.markdown("""
-**7-Layer Signal Engine**
-
-Each stock is evaluated across 7 independent layers. All layers must show net positive signals to qualify.
-
-1. **Trend Structure** — EMA alignment (5/10/20/50), ADX strength, candle position, gap-ups. The foundation — no trend = no trade.
-
-2. **Momentum Cascade** — RSI zone + direction, MACD histogram expansion, Stochastic crossovers, relative strength vs market. Is buying pressure accelerating?
-
-3. **Volume Footprint** — Institutional volume (≥2.5× avg = 🐋), volume trend from history, on-balance accumulation (up-day vol > down-day vol). Who is buying?
-
-4. **Price Pattern** — VWAP zone (intraday), 1-month cycle position, Bollinger Band position + squeeze, support/resistance proximity. Where exactly to buy?
-
-5. **Market Breadth** — Advancers vs decliners, average market change, relative alpha. Is the tide helping?
-
-6. **Volatility State** — Historical volatility (annualised), ATR-based stops, BB squeeze detection (pre-breakout compression). Is risk manageable?
-
-7. **Historical Quality** — 90-day stability score, higher-lows pattern, 30-day trend, consecutive streak, Wyckoff accumulation. Has this stock been behaving well?
-""")
-    with m2:
-        st.markdown("""
-**Hard Gates (automatic disqualification)**
-
-- **Intraday:** Price below VWAP, volume <1×avg, RSI >82, price <₹2
-- **Swing:** Price below EMA50, RSI >78, ADX <15, volume <80% of floor
-- **Long-term:** Sector quality <6, stability <2.5, RSI >70, 1-month loss >20%
-
-**Risk Management**
-
-| Strategy | Capital/Trade | Stop Type | Target |
-|---|---|---|---|
-| Intraday | ≤1% portfolio | 0.6×ATR | 1.0×ATR |
-| Swing | ≤3% portfolio | 1.5×ATR or support | 3.0×ATR |
-| Long-Term | ≤5% portfolio | −12% hard | +25–55% |
-
-**Golden Rules**
-- Never add to a losing position
-- Trail stops once +5% in profit
-- Exit if A/D ratio drops below 0.4 during intraday
-- Breadth bearish = reduce all swing sizes by 50%
-- Maximum 2 stocks per sector simultaneously
-""")
-
-# ── Footer ────────────────────────────────────────────────────────────────────
-st.markdown(f"""
-<div style="margin-top:2rem;padding-top:1rem;border-top:1px solid rgba(15,23,42,0.8);
-            font-size:0.68rem;color:#1e293b;font-family:'JetBrains Mono',monospace;text-align:center;">
-  PSX Elite Scanner · 7-Layer Engine · {len(KSE100)} Symbols · ATR Stops · Live + 90-Day History ·
-  {pkt_now().strftime("%H:%M:%S PKT")}
-</div>""", unsafe_allow_html=True)
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
 if is_open:
