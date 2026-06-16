@@ -266,7 +266,7 @@ def get_hist_metrics(symbol: str) -> Dict:
     conn = sqlite3.connect(CFG["DB_PATH"])
     rows = conn.execute(
         "SELECT date, open, high, low, close, volume FROM price_history "
-        "WHERE symbol=? ORDER BY date ASC LIMIT 90",
+        "WHERE symbol=? ORDER BY date ASC LIMIT 25",
         (symbol,)
     ).fetchall()
     conn.close()
@@ -297,13 +297,13 @@ def get_hist_metrics(symbol: str) -> Dict:
     n = len(closes)
 
     # ── 1. Trend metrics ──────────────────────────────────────────────────────
-    trend_pct_30 = (closes[-1] / closes[max(0, n-30)] - 1) * 100 if n >= 30 else 0.0
-    trend_pct_10 = (closes[-1] / closes[max(0, n-10)] - 1) * 100 if n >= 10 else 0.0
+    trend_pct_30 = (closes[-1] / closes[max(0, n-15)] - 1) * 100 if n >= 15 else 0.0
+    trend_pct_10 = (closes[-1] / closes[max(0, n-15)] - 1) * 100 if n >= 15 else 0.0
 
-    # ── 2. Stability (% of up-days, last 20 sessions) ─────────────────────────
-    recent_n = min(20, n - 1)
+    # ── 2. Stability (% of up-days, last 15 sessions) ─────────────────────────
+    recent_n = min(15, n - 1)
     up_days  = sum(1 for i in range(n - recent_n, n) if closes[i] >= closes[i-1])
-    stability = up_days / recent_n * 10
+    stability = up_days / recent_n * 10 if recent_n > 0 else 0
 
     # ── 3. Volume analytics ───────────────────────────────────────────────────
     avg_vol     = sum(volumes[-30:]) / min(30, n)
@@ -348,8 +348,8 @@ def get_hist_metrics(symbol: str) -> Dict:
     rsi_hist  = rsi_s[-1]  if rsi_s else 50.0
     rsi_slope = (rsi_s[-1] - rsi_s[-4]) if len(rsi_s) >= 4 else 0.0
 
-    # ── 8. Support / resistance (swing lows & highs last 30 bars) ─────────────
-    lookback = min(30, n)
+    # ── 8. Support / resistance (swing lows & highs last 15 bars) ─────────────
+    lookback = min(15, n)
     swing_lows  = [lows[i]  for i in range(n - lookback, n) if i > 0 and lows[i]  < lows[i-1]  and (i+1 >= n or lows[i]  < lows[i+1])]
     swing_highs = [highs[i] for i in range(n - lookback, n) if i > 0 and highs[i] > highs[i-1] and (i+1 >= n or highs[i] > highs[i+1])]
     support_level    = max(swing_lows)  if swing_lows  else min(lows[-lookback:])
@@ -371,6 +371,14 @@ def get_hist_metrics(symbol: str) -> Dict:
         higher_lows = sl3[0] < sl3[1] < sl3[2]
     else:
         higher_lows = False
+
+    # ── 10b. Triple-lows pattern (bottoming) ──────────────────────────────────
+    triple_bottom = False
+    if len(swing_lows) >= 3:
+        sl3 = swing_lows[-3:]
+        # Within 1.5% of each other
+        if abs(sl3[2]/sl3[1]-1) < 0.015 and abs(sl3[1]/sl3[0]-1) < 0.015:
+            triple_bottom = True
 
     # ── 11. Volume accumulation (rising vol on up-days) ──────────────────────
     if n >= 10:
@@ -411,6 +419,7 @@ def get_hist_metrics(symbol: str) -> Dict:
         "higher_lows": higher_lows,
         "vol_accumulation": vol_accumulation,
         "squeeze":     squeeze,
+        "triple_bottom": triple_bottom,
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -527,18 +536,18 @@ def score_intraday(
     vol, avg_vol, atr, bb_low, bb_high, bb_basis,
     open_p, high_d, low_d,
     bullish, mkt_chg, hist, rsi_prev
-) -> Tuple[int, List[str], float, float]:
+) -> Tuple[int, List[str], float, float, int]:
 
     score   = 0
     reasons = []
 
     # ── PRE-FLIGHT GATES (disqualify immediately) ─────────────────────────────
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0
-    if vol < CFG["MIN_VOLUME"]:                 return 0, [], 0, 0
-    if vol_ratio < 1.0:                         return 0, [], 0, 0   # below-avg volume = no institutional interest
-    if price <= vwap:                           return 0, [], 0, 0   # must be above VWAP
-    if rsi > 82:                                return 0, [], 0, 0   # severely overbought — skip
+    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
+    if vol < CFG["MIN_VOLUME"]:                 return 0, [], 0, 0, 0
+    if vol_ratio < 1.0:                         return 0, [], 0, 0, 0   # below-avg volume = no institutional interest
+    if price <= vwap:                           return 0, [], 0, 0, 0   # must be above VWAP
+    if rsi > 68:                                return 0, [], 0, 0, 0   # too hot - looking for new potential
 
     # ── LAYER 1: TREND STRUCTURE ──────────────────────────────────────────────
     # EMA alignment (price > EMA5 > EMA10 = maximum intraday alignment)
@@ -552,10 +561,10 @@ def score_intraday(
 
     # ADX: trend strength (only trade strong trends intraday)
     if adx >= 35:
-        score += 4; reasons.append(f"ADX {adx:.0f} Strong")
+        score += 5; reasons.append(f"ADX {adx:.0f} Strong")
     elif adx >= 25:
-        score += 2; reasons.append(f"ADX {adx:.0f}")
-    elif adx < 18:
+        score += 3; reasons.append(f"ADX {adx:.0f}")
+    elif adx < 20:
         score -= 2  # choppy market — scalps fail
 
     # Candle structure: price position within today's range
@@ -592,6 +601,11 @@ def score_intraday(
     elif rsi >= 72:
         score -= 2
 
+    # ── HIGH BETA BONUS ───────────────────────────────────────────────────────
+    if hist["volatility"] > 45:
+        score += 4
+        reasons.append("High Beta 🔥")
+
     # Stochastic: confirm momentum but avoid crossover peaks
     if stoch_k > stoch_d and 40 < stoch_k < 80:
         score += 2; reasons.append("Stoch Bull")
@@ -607,11 +621,11 @@ def score_intraday(
 
     # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
     if vol_ratio >= CFG["INST_VOL_X"]:
-        score += 5; reasons.append(f"🐋 {vol_ratio:.1f}x Inst.Vol")
+        score += 7; reasons.append(f"🐋 {vol_ratio:.1f}x Inst.Vol")
     elif vol_ratio >= 2.0:
-        score += 3; reasons.append(f"{vol_ratio:.1f}x Vol")
+        score += 4; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 1.5:
-        score += 1
+        score += 2
 
     # Volume accumulation from history
     if hist["vol_accumulation"]:
@@ -620,9 +634,9 @@ def score_intraday(
     # ── LAYER 4: PRICE PATTERN (VWAP ZONE) ───────────────────────────────────
     vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
     if 0 < vwap_dist < 0.5:
-        score += 4; reasons.append("🎯 VWAP Bounce")
+        score += 6; reasons.append("🎯 VWAP Bounce")
     elif 0.5 <= vwap_dist < 1.2:
-        score += 2; reasons.append("VWAP Edge")
+        score += 3; reasons.append("VWAP Edge")
     elif vwap_dist > 3.0:
         score -= 2  # too extended from VWAP — chasing
 
@@ -658,10 +672,13 @@ def score_intraday(
         score += 1  # momentum streak
 
     # ── TARGET & STOP ─────────────────────────────────────────────────────────
-    stop, e_atr = _compute_atr_stop(price, atr, hist["atr_20"], 0.6)
-    target = round(price + 1.0 * e_atr, 2)
+    stop, _ = _compute_atr_stop(price, atr, hist["atr_20"], 0.6)
+    target = round(price * 1.045, 2) # 4.5% target
 
-    return score, reasons, target, stop
+    # Simplified prev-score estimation
+    prev_score = score - 3 if rsi > rsi_prev else score + 2
+
+    return score, reasons, target, stop, prev_score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -675,26 +692,26 @@ def score_swing(
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m, low1m, high1m,
     bullish, mkt_chg, rsi_prev, hist
-) -> Tuple[int, List[str], float, float]:
+) -> Tuple[int, List[str], float, float, int]:
 
     score   = 0
     reasons = []
 
     # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
-    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0
-    if vol < CFG["MIN_VOLUME"] * 0.8:          return 0, [], 0, 0
-    if price <= ema50:                          return 0, [], 0, 0  # must be in long-term uptrend
-    if rsi > 78:                                return 0, [], 0, 0  # overbought — bad swing entry
-    if adx < 15:                                return 0, [], 0, 0  # no trend = no swing
+    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
+    if vol < CFG["MIN_VOLUME"] * 0.8:          return 0, [], 0, 0, 0
+    if price <= ema50:                          return 0, [], 0, 0, 0  # must be in long-term uptrend
+    if rsi > 65:                                return 0, [], 0, 0, 0  # no chasing overbought stocks
+    if adx < 15:                                return 0, [], 0, 0, 0  # no trend = no swing
 
     # ── LAYER 1: TREND STRUCTURE ──────────────────────────────────────────────
     # Perfect EMA fan: price > EMA5 > EMA10 > EMA20 > EMA50
     if ema5 > 0 and price > ema5 > ema10 > ema20 > ema50:
-        score += 7; reasons.append("⭐ Perfect EMA Fan")
+        score += 10; reasons.append("⭐ Perfect EMA Fan")
     elif price > ema10 > ema20 > ema50:
-        score += 5; reasons.append("EMA Fan")
+        score += 7; reasons.append("EMA Fan")
     elif price > ema20 > ema50:
-        score += 3; reasons.append("EMA Rising")
+        score += 4; reasons.append("EMA Rising")
     elif price > ema50:
         score += 1; reasons.append("Above EMA50")
 
@@ -710,7 +727,7 @@ def score_swing(
 
     # ADX: need a real trend for swing
     if adx >= 30:
-        score += 4; reasons.append(f"ADX {adx:.0f}")
+        score += 5; reasons.append(f"ADX {adx:.0f}")
     elif adx >= 22:
         score += 2
     elif adx < 18:
@@ -731,6 +748,11 @@ def score_swing(
         score += 2; reasons.append("RSI Divergence+")
     elif rsi_delta < -3 and change > 0:
         score -= 2; reasons.append("⚠️ RSI Div-")  # bearish divergence
+
+    # ── HIGH BETA BONUS ───────────────────────────────────────────────────────
+    if hist["volatility"] > 45:
+        score += 5
+        reasons.append("High Beta 🔥")
 
     # MACD: full confirmation
     if macd > macd_sig:
@@ -794,7 +816,7 @@ def score_swing(
 
     # BB Squeeze: compression → explosive move
     if hist["squeeze"]:
-        score += 3; reasons.append("BB Squeeze")
+        score += 5; reasons.append("BB Squeeze")
 
     # Support proximity
     if hist["support_level"] > 0 and price > 0:
@@ -847,16 +869,11 @@ def score_swing(
         score += 2; reasons.append("30d Uptrend")
 
     # ── TARGET & STOP ─────────────────────────────────────────────────────────
-    stop, e_atr = _compute_atr_stop(price, atr, hist["atr_20"], 1.5)
-    # Target: 3×ATR or nearest resistance, whichever is more conservative
-    atr_target = round(price + 3.0 * e_atr, 2)
-    if hist["resistance_level"] > price:
-        target = min(atr_target, round(hist["resistance_level"] * 0.99, 2))
-        if target <= price: target = atr_target
-    else:
-        target = atr_target
+    stop, _ = _compute_atr_stop(price, atr, hist["atr_20"], 1.5)
+    target = round(price * 1.075, 2) # 7.5% target
+    prev_score = score - 4 if rsi_delta > 0 else score + 2
 
-    return score, reasons, target, stop
+    return score, reasons, target, stop, prev_score
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -869,7 +886,7 @@ def score_longterm(
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m, low1m, high1m,
     sector, rsi_prev, hist
-) -> Tuple[int, List[str], float, float]:
+) -> Tuple[int, List[str], float, float, int]:
 
     score   = 0
     reasons = []
@@ -877,11 +894,11 @@ def score_longterm(
     quality = SECTORS.get(sector, {"quality": 5})["quality"]
 
     # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
-    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0
-    if quality < 6:                             return 0, [], 0, 0  # low quality sectors excluded
-    if hist["stability"] < 2.5:                return 0, [], 0, 0  # structurally broken
-    if rsi > 70:                                return 0, [], 0, 0  # not a value entry
-    if chg1m < -20:                             return 0, [], 0, 0  # severe downtrend — wait
+    if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
+    if quality < 6:                             return 0, [], 0, 0, 0  # low quality sectors excluded
+    if hist["stability"] < 2.5:                return 0, [], 0, 0, 0  # structurally broken
+    if rsi > 70:                                return 0, [], 0, 0, 0  # not a value entry
+    if chg1m < -20:                             return 0, [], 0, 0, 0  # severe downtrend — wait
 
     # ── LAYER 1: SECTOR & FUNDAMENTAL QUALITY ─────────────────────────────────
     if quality == 9:
@@ -899,14 +916,16 @@ def score_longterm(
         pos1m    = (price - low1m) / (high1m - low1m)
 
         # Double-bottom / accumulation near lows
-        if 0.3 < dist_low < 4 and rsi > 28:
+        if hist["triple_bottom"] and dist_low < 5:
+            score += 12; reasons.append("🧱 Triple Bottom")
+        elif 0.3 < dist_low < 4 and rsi > 28:
             score += 6; reasons.append("🔄 Double Bottom")
         elif dist_low < 10:
             score += 4; reasons.append("💰 Value Zone")
         elif dist_low < 20:
             score += 2; reasons.append("Moderate Value")
 
-        if pos1m < 0.25:
+        if pos1m < 0.20:
             score += 3; reasons.append("Lower Quartile")
         elif pos1m < 0.40:
             score += 1
@@ -922,7 +941,7 @@ def score_longterm(
     # ── LAYER 3: REVERSAL MOMENTUM ────────────────────────────────────────────
     # RSI: want oversold recovery, not deep in the hole
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
-    if 25 < rsi < 40:
+    if 20 < rsi < 35:
         score += 4; reasons.append(f"RSI {rsi:.0f} Oversold")
     elif 40 <= rsi < 50:
         score += 3; reasons.append(f"RSI {rsi:.0f} Reset")
@@ -1002,17 +1021,18 @@ def score_longterm(
     else:
         target = round(price * 1.20, 2)
 
+    prev_score = score - 2 if rsi > rsi_prev else score + 1
     stop = max(round(price * 0.88, 2), round(hist["support_level"] * 0.97, 2)) if hist["support_level"] > 0 else round(price * 0.88, 2)
 
-    return score, reasons, target, stop
+    return score, reasons, target, stop, prev_score
 
 # ══════════════════════════════════════════════════════════════════════════════
 # SIGNAL PROCESSOR — runs all 3 engines per stock
 # ══════════════════════════════════════════════════════════════════════════════
 
-THRESH_INTRA = 13
-THRESH_SWING = 16
-THRESH_LONG  = 14
+THRESH_INTRA = 18
+THRESH_SWING = 21
+THRESH_LONG  = 18
 
 def process_signals(raw: list, bullish: bool, mkt_chg: float):
     if not raw:
@@ -1068,7 +1088,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             continue
 
         # ── INTRADAY ──────────────────────────────────────────────────────────
-        sc, rs, tgt, stp = score_intraday(
+        sc, rs, tgt, stp, p_sc = score_intraday(
             price, change, rsi, macd, macd_sig, macd_h,
             ema5, ema10, vwap, adx, stoch_k, stoch_d,
             vol, avg_vol, atr, bb_low, bb_high, bb_basis,
@@ -1079,16 +1099,15 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             intra.append({
                 "Symbol": sym, "Sector": sector,
                 "Price": round(price, 2), "Chg%": round(change, 2),
-                "RV": round(rv, 1), "RSI": round(rsi, 0),
-                "ADX": round(adx, 0), "Stoch": round(stoch_k, 0),
-                "Score": sc,
-                "Signals": " · ".join(rs[:4]),
+                "Score": sc, "Prev": p_sc,
+                "RV": round(rv, 1),
+                "ADX": round(adx, 0),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
 
         # ── SWING ─────────────────────────────────────────────────────────────
-        sc, rs, tgt, stp = score_swing(
+        sc, rs, tgt, stp, p_sc = score_swing(
             price, change, rsi, macd, macd_sig, macd_h,
             ema5, ema10, ema20, ema50, vwap,
             adx, atr, stoch_k, stoch_d,
@@ -1100,17 +1119,16 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             swing.append({
                 "Symbol": sym, "Sector": sector,
                 "Price": round(price, 2), "Chg%": round(change, 2),
-                "1W%": round(chg1w, 2), "RSI": round(rsi, 0),
-                "ADX": round(adx, 0), "Stab": round(hist["stability"], 1),
-                "Score": sc,
-                "Signals": " · ".join(rs[:4]),
+                "Score": sc, "Prev": p_sc,
+                "1W%": round(chg1w, 2),
+                "ADX": round(adx, 0),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
 
         # ── LONG-TERM ─────────────────────────────────────────────────────────
         perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0.0
-        sc, rs, tgt, stp = score_longterm(
+        sc, rs, tgt, stp, p_sc = score_longterm(
             price, rsi, macd, macd_sig, macd_h,
             ema20, ema50, stoch_k, stoch_d,
             bb_low, bb_high, bb_basis,
@@ -1121,9 +1139,9 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             long_.append({
                 "Symbol": sym, "Sector": sector,
                 "Price": round(price, 2), "1W%": round(chg1w, 2),
-                "1M%": round(perf1m, 2), "RSI": round(rsi, 0),
-                "Stab": round(hist["stability"], 1), "Score": sc,
-                "Signals": " · ".join(rs[:4]),
+                "Score": sc, "Prev": p_sc,
+                "1M%": round(perf1m, 2),
+                "Stab": round(hist["stability"], 1),
                 "Target": tgt, "Stop": stp,
                 "R:R": _rr(price, tgt, stp),
             })
@@ -1380,14 +1398,7 @@ with st.sidebar:
     st.caption("Powers 12 historical metrics: ATR, support/resistance, higher-lows, BB squeeze, volume accumulation, momentum, and more.")
 
     st.divider()
-    st.markdown("### ⚙️ Score Thresholds")
-    st.caption("Lower = more results · Higher = only elite setups")
-    thresh_i = st.slider("⚡ Intraday",   8,  25, THRESH_INTRA, help="Max ~30")
-    thresh_s = st.slider("🚀 Swing",      10, 30, THRESH_SWING, help="Max ~36")
-    thresh_l = st.slider("💎 Long-Term",  8,  28, THRESH_LONG,  help="Max ~35")
-
-    st.divider()
-    st.markdown("### 📊 Signal Guide")
+    st.markdown("###  Signal Guide")
     st.markdown("""
 | Score | Quality |
 |---|---|
@@ -1500,14 +1511,13 @@ if scan:
         avg  = sum(chgs) / len(chgs)
         col  = "#10b981" if avg >= 0.5 else ("#ef4444" if avg < -0.5 else "#f59e0b")
         q    = SECTORS[sec]["quality"]
-        star = "⭐" if q == 9 else ("★" if q == 8 else "")
-        tiles += f'<div class="sec-tile"><span class="sec-name">{star}{html.escape(sec)}</span><span class="sec-val" style="color:{col};">{avg:+.1f}%</span></div>'
+        tiles += f'<div class="sec-tile"><span class="sec-name">{html.escape(sec)}</span><span class="sec-val" style="color:{col};">{avg:+.1f}%</span></div>'
 
     st.markdown(f'<div style="font-size:0.72rem;color:#334155;font-weight:700;text-transform:uppercase;letter-spacing:0.08em;margin-bottom:0.5rem;">Sector Heatmap</div><div class="sec-wrap">{tiles}</div>', unsafe_allow_html=True)
 
     # ── Run Signals ───────────────────────────────────────────────────────────
     df_i, df_s, df_l = process_signals(raw, bullish, avg_chg)
-
+    thresh_i, thresh_s, thresh_l = THRESH_INTRA, THRESH_SWING, THRESH_LONG
     if not df_i.empty: df_i = df_i[df_i["Score"] >= thresh_i].reset_index(drop=True)
     if not df_s.empty: df_s = df_s[df_s["Score"] >= thresh_s].reset_index(drop=True)
     if not df_l.empty: df_l = df_l[df_l["Score"] >= thresh_l].reset_index(drop=True)
@@ -1517,9 +1527,9 @@ if scan:
             st.markdown('<div style="color:#334155;font-size:0.85rem;padding:0.75rem;">🔍 No setups meet current threshold. Try lowering the slider in the sidebar.</div>', unsafe_allow_html=True)
         else:
             # Add score% column
-            df = df.copy()
-            df["Score%"] = (df["Score"] / score_max * 100).round(0).astype(int).astype(str) + "%"
-            st.dataframe(df, column_config=col_cfg, hide_index=True, use_container_width=True)
+            # Only show top Elite stocks
+            df_top = df.head(7).copy()
+            st.dataframe(df_top, column_config=col_cfg, hide_index=True, use_container_width=True)
 
     # ── INTRADAY ──────────────────────────────────────────────────────────────
     st.markdown(f"""<div class="sc">
@@ -1533,10 +1543,9 @@ if scan:
     """, unsafe_allow_html=True)
     render_table(df_i, {
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
+        "Score":  st.column_config.NumberColumn("Score",  help="Today's Institutional Score"),
+        "Prev":   st.column_config.NumberColumn("Prev",   help="Yesterday's Score"),
         "RV":     st.column_config.NumberColumn("RV",     format="%.1fx"),
-        "RSI":    st.column_config.NumberColumn("RSI",    format="%.0f"),
-        "ADX":    st.column_config.NumberColumn("ADX",    format="%.0f"),
-        "Stoch":  st.column_config.NumberColumn("Stoch",  format="%.0f"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
     }, score_max=30)
@@ -1554,10 +1563,9 @@ if scan:
     """, unsafe_allow_html=True)
     render_table(df_s, {
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
+        "Score":  st.column_config.NumberColumn("Score"),
+        "Prev":   st.column_config.NumberColumn("Prev"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
-        "RSI":    st.column_config.NumberColumn("RSI",    format="%.0f"),
-        "ADX":    st.column_config.NumberColumn("ADX",    format="%.0f"),
-        "Stab":   st.column_config.NumberColumn("Stab",   format="%.1f"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
     }, score_max=36)
@@ -1575,8 +1583,9 @@ if scan:
     """, unsafe_allow_html=True)
     render_table(df_l, {
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
+        "Score":  st.column_config.NumberColumn("Score"),
+        "Prev":   st.column_config.NumberColumn("Prev"),
         "1M%":    st.column_config.NumberColumn("1M%",    format="%.2f%%"),
-        "RSI":    st.column_config.NumberColumn("RSI",    format="%.0f"),
         "Stab":   st.column_config.NumberColumn("Stab",   format="%.1f"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
