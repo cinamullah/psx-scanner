@@ -1190,6 +1190,15 @@ div[data-testid="stExpander"] {
 
 hr { border-color:rgba(30,41,59,0.4) !important; margin: 1.5rem 0 !important; }
 
+/* Force columns to stay horizontal on mobile - Desktop UI on Mobile */
+@media (max-width: 640px) {
+    div[data-testid="stHorizontalBlock"] {
+        flex-direction: row !important;
+        flex-wrap: nowrap !important;
+        align-items: center !important;
+    }
+}
+
 .alert-box {
     background: rgba(239,68,68,0.08); border: 1px solid rgba(239,68,68,0.2);
     border-radius: 10px; padding: 0.75rem 1rem; margin-bottom: 0.75rem;
@@ -1223,26 +1232,38 @@ bclass   = "b-bull" if bullish else ("b-bear" if avg_chg < -0.5 else "b-neut")
 vol_cr   = idx_vol / 1e7
 
 
-c_title, c_btns = st.columns([6, 1])
-with c_title:
+h_cols = st.columns([12, 1, 1])
+with h_cols[0]:
     st.markdown("<h3 style='margin:0; padding:0;'>PSX Scanner</h3>", unsafe_allow_html=True)
-with c_btns:
-    bc1, bc2 = st.columns([1, 1])
-    scan_btn = bc1.button("🔍", help="Scan Now")
-    sync_btn = bc2.button("🔄", help="Sync History")
-    if sync_btn:
-        sync_historical_data(KSE100)
-        st.rerun()
+scan_btn = h_cols[1].button("🔍", help="Scan Now")
+sync_btn = h_cols[2].button("🔄", help="Sync History")
+st.markdown("<div style='border-bottom: 1px solid rgba(255,255,255,0.1); margin: 5px 0 15px 0;'></div>", unsafe_allow_html=True)
 
-m1, m2, m3, m4 = st.columns(4)
-with m1:
-    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>KSE-100</div><div style='font-size:1.1rem; font-weight:700;'>{idx_close:,.0f} <span style='font-weight:400; color:{'#10b981' if idx_pct >= 0 else '#ef4444'}; font-size:0.85rem;'>{idx_pct:+.2f}%</span></div>", unsafe_allow_html=True)
-with m2:
-    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market State</div><div style='font-size:1.1rem; font-weight:700;'>{'LIVE' if is_open else 'CLOSED'}</div>", unsafe_allow_html=True)
-with m3:
-    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>A/D Ratio</div><div style='font-size:1.1rem; font-weight:700;'>{adv} ▲ / {dec} ▼</div>", unsafe_allow_html=True)
-with m4:
-    st.markdown(f"<div style='font-size:0.75rem; color:#64748b; font-weight:700; text-transform:uppercase;'>Market Volume</div><div style='font-size:1.1rem; font-weight:700;'>{vol_cr:.1f} Cr</div>", unsafe_allow_html=True)
+if sync_btn:
+    sync_historical_data(KSE100)
+    st.rerun()
+
+st.markdown(f"""
+<div style="display: flex; flex-direction: row; justify-content: space-between; gap: 10px; margin-bottom: 1rem; border-bottom: 1px solid rgba(30,41,59,0.4); padding-bottom: 10px;">
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size:0.7rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">KSE-100</div>
+        <div style="font-size:1rem; font-weight:700; white-space: nowrap;">{idx_close:,.0f}</div>
+        <div style="font-size:0.75rem; color:{'#10b981' if idx_pct >= 0 else '#ef4444'}; font-weight:400; white-space: nowrap;">{idx_pct:+.2f}%</div>
+    </div>
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size:0.7rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">State</div>
+        <div style="font-size:1rem; font-weight:700; white-space: nowrap;">{'LIVE' if is_open else 'CLOSED'}</div>
+    </div>
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size:0.7rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">A/D Ratio</div>
+        <div style="font-size:1rem; font-weight:700; white-space: nowrap;">{adv}▲/{dec}▼</div>
+    </div>
+    <div style="flex: 1; min-width: 0;">
+        <div style="font-size:0.7rem; color:#64748b; font-weight:700; text-transform:uppercase; white-space: nowrap;">Volume</div>
+        <div style="font-size:1rem; font-weight:700; white-space: nowrap;">{vol_cr:.1f} Cr</div>
+    </div>
+</div>
+""", unsafe_allow_html=True)
 
 # ─── Market breadth warning ───────────────────────────────────────────────────
 if not bullish:
