@@ -499,11 +499,11 @@ def score_intraday(
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
     if vol < CFG["MIN_VOLUME"]:                 return 0, [], 0, 0, 0
-    if vol_ratio < 1.0:                         return 0, [], 0, 0, 0   # below-avg volume = no institutional interest
-    if price <= vwap:                           return 0, [], 0, 0, 0   # must be above VWAP
-    if rsi > 68:                                return 0, [], 0, 0, 0   # too hot - looking for new potential
+    if vol_ratio < 0.7:                         return 0, [], 0, 0, 0   # Reduced from 1.0 to catch early moves
+    if price < vwap * 0.995:                    return 0, [], 0, 0, 0   # Allow 0.5% wiggle room below VWAP
 
     # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
+    if vol_ratio >= 1.0: score += 1 # Small bonus for crossing the average
     if vol_ratio >= CFG["INST_VOL_X"]:
         score += 7; reasons.append(f"🐋 {vol_ratio:.1f}x Inst.Vol")
     elif vol_ratio >= 2.0:
@@ -548,12 +548,14 @@ def score_intraday(
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if rsi < 40 and rsi_delta > 4:
         score += 5; reasons.append("Oversold Momentum Turn")
-    elif 52 < rsi < 72:
+    elif 52 < rsi < 75:
         score += 2; reasons.append(f"RSI {rsi:.0f}")
         if rsi_delta > 3:
             score += 1; reasons.append("Momentum Turn")
+    elif rsi >= 75:
+        score -= 3; reasons.append("⚠️ Overbought") # Penalize instead of killing
 
-    if stoch_k > stoch_d and 40 < stoch_k < 80:
+    if stoch_k > stoch_d and 30 < stoch_k < 85:
         score += 2; reasons.append("Stoch Turn")
 
     if bb_basis > 0:
@@ -581,7 +583,6 @@ def score_intraday(
     if day_range > 0 and (price - low_d) / day_range < 0.3: score -= 1
     if macd < macd_sig: score -= 1
     if rsi < 50: score -= 1
-    elif rsi >= 72: score -= 2
     if stoch_k > 85: score -= 1
     if vwap_dist > 3.0: score -= 2
 
@@ -645,9 +646,10 @@ def score_swing(
     # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
     if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
     if vol < CFG["MIN_VOLUME"] * 0.8:          return 0, [], 0, 0, 0
-    if price <= ema50:                          return 0, [], 0, 0, 0  # must be in long-term uptrend
-    if rsi > 65:                                return 0, [], 0, 0, 0  # no chasing overbought stocks
-    if adx < 15:                                return 0, [], 0, 0, 0  # no trend = no swing
+    if price < ema50 * 0.985:                   return 0, [], 0, 0, 0  # Allow minor dip below EMA50
+    if adx < 12:                                return 0, [], 0, 0, 0  # Catching slightly earlier trends
+
+    if rsi > 72: score -= 5; reasons.append("⚠️ RSI High") # Penalize instead of block
 
     # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
@@ -857,9 +859,10 @@ def score_longterm(
     # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
     if price < CFG["MIN_PRICE"]:                return 0, [], 0, 0, 0
     if quality < 6:                             return 0, [], 0, 0, 0  # low quality sectors excluded
-    if hist["stability"] < 2.5:                return 0, [], 0, 0, 0  # structurally broken
-    if rsi > 70:                                return 0, [], 0, 0, 0  # not a value entry
-    if chg1m < -20:                             return 0, [], 0, 0, 0  # severe downtrend — wait
+    if hist["stability"] < 2.0:                return 0, [], 0, 0, 0  # structurally broken
+
+    if rsi > 75: score -= 10; reasons.append("⚠️ Expensive")
+    if chg1m < -25: score -= 5; reasons.append("⚠️ Falling Knife")
 
     # ── LAYER 1: SECTOR & FUNDAMENTAL QUALITY ─────────────────────────────────
     if quality == 9:
@@ -1050,6 +1053,20 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         sector = SYM_SECTOR.get(sym, "Misc")
         hist = get_hist_metrics(sym, conn)
 
+        # Standard Pivot Calculation (Floor Pivots)
+        h_piv, l_piv = (high_d if high_d > 0 else price), (low_d if low_d > 0 else price)
+        p_piv = (h_piv + l_piv + price) / 3
+        r1, s1 = round(2 * p_piv - l_piv, 2), round(2 * p_piv - h_piv, 2)
+        r2, s2 = round(p_piv + (h_piv - l_piv), 2), round(p_piv - (h_piv - l_piv), 2)
+
+        # Dynamic Best Buy/Sell based on Pivot Theory
+        best_buy = s1 if price > s1 else s2
+        best_sell = r1 if price < r1 else r2
+
+        # Trend Bias Logic
+        is_buying = (price > vwap) and (macd > macd_sig) and (rsi > 50)
+        trend_label = "Buying" if is_buying else "Selling"
+
         # Minimum liquidity: both absolute floor AND 30% of historical average
         if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
             continue
@@ -1065,8 +1082,11 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         if sc >= THRESH_INTRA and tgt > price > stp:
             intra.append({
                 "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Chg%": round(change, 2),
+                "Price": round(price, 2), "Trend": trend_label,
+                "Chg%": round(change, 2),
                 "Score": sc, "Prev": p_sc,
+                "Best price to buy": best_buy, "Best Price to sell": best_sell,
+                "R1": r1, "R2": r2, "S1": s1, "S2": s2,
                 "RV": round(rv, 1),
                 "RSI": round(rsi, 0),
                 "Reasons": " · ".join(rs),
@@ -1086,8 +1106,11 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         if sc >= THRESH_SWING and tgt > price > stp:
             swing.append({
                 "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Chg%": round(change, 2),
+                "Price": round(price, 2), "Trend": trend_label,
+                "Chg%": round(change, 2),
                 "Score": sc, "Prev": p_sc,
+                "Best price to buy": best_buy, "Best Price to sell": best_sell,
+                "R1": r1, "R2": r2, "S1": s1, "S2": s2,
                 "1W%": round(chg1w, 2),
                 "Reasons": " · ".join(rs[:2]),
                 "RSI": round(rsi, 0),
@@ -1107,8 +1130,11 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         if sc >= THRESH_LONG and tgt > price > stp:
             long_.append({
                 "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "1W%": round(chg1w, 2),
+                "Price": round(price, 2), "Trend": trend_label,
+                "1W%": round(chg1w, 2),
                 "Score": sc, "Prev": p_sc,
+                "Best price to buy": best_buy, "Best Price to sell": best_sell,
+                "R1": r1, "R2": r2, "S1": s1, "S2": s2,
                 "1M%": round(perf1m, 2),
                 "Stab": round(hist["stability"], 1),
                 "RSI": round(rsi, 0),
@@ -1126,6 +1152,9 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 
 if "positions" not in st.session_state:
     st.session_state.positions = []
+if "trend_history" not in st.session_state:
+    st.session_state.trend_history = {}
+
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
 st.markdown("""
@@ -1323,6 +1352,32 @@ if scan:
     if not df_l.empty: df_l = df_l[df_l["Score"] >= thresh_l].reset_index(drop=True)
 
     def render_table(df: pd.DataFrame, col_cfg: dict, score_max: int):
+        """Renders the main dataframes, applying styling for trend changes."""
+        if df.empty:
+            st.write("No setups meet current threshold.")
+        else:
+            df_top = df.head(7).copy()
+
+            def style_trend(row):
+                prev_trend = st.session_state.trend_history.get(row['Symbol'])
+                current_trend = row['Trend']
+                style = ''
+                if prev_trend:
+                    if prev_trend == 'Selling' and current_trend == 'Buying':
+                        style = 'background-color: rgba(16, 185, 129, 0.25);' # Green highlight
+                    elif prev_trend == 'Buying' and current_trend == 'Selling':
+                        style = 'background-color: rgba(239, 68, 68, 0.2);' # Red highlight
+                return [style if col == 'Trend' else '' for col in df_top.columns]
+
+            st.dataframe(
+                df_top.style.apply(style_trend, axis=1),
+                column_config=col_cfg,
+                hide_index=True,
+                use_container_width=True
+            )
+
+    def render_simple_table(df: pd.DataFrame, col_cfg: dict):
+        """Renders a simple table without styling or limits."""
         if df.empty:
             st.write("No setups meet current threshold.")
         else:
@@ -1334,37 +1389,58 @@ if scan:
     # ── INTRADAY ──────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1rem; margin-bottom:5px;'><b>INTRADAY SCALPS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_i)} &nbsp; Threshold: {thresh_i}/30 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
 
-    render_table(df_i, {
+    render_simple_table(df_i, {
+        "Trend":  st.column_config.TextColumn("Trend"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score",  help="Today's Institutional Score"),
+        "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
+        "Best Price to sell": st.column_config.NumberColumn("Best Sell", format="%.2f"),
+        "R1": st.column_config.NumberColumn("R1", format="%.2f"),
+        "R2": st.column_config.NumberColumn("R2", format="%.2f"),
+        "S1": st.column_config.NumberColumn("S1", format="%.2f"),
+        "S2": st.column_config.NumberColumn("S2", format="%.2f"),
         "Prev":   st.column_config.NumberColumn("Prev",   help="Yesterday's Score"),
         "RV":     st.column_config.NumberColumn("RV",     format="%.1fx"),
         "RSI":    st.column_config.NumberColumn("RSI",    format="%d"),
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    }, score_max=30)
+    })
 
     # ── SWING ────────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>SWING TRADES</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_s)} &nbsp; Threshold: {thresh_s}/36 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
 
-    render_table(df_s, {
+    render_simple_table(df_s, {
+        "Trend":  st.column_config.TextColumn("Trend"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
+        "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
+        "Best Price to sell": st.column_config.NumberColumn("Best Sell", format="%.2f"),
+        "R1": st.column_config.NumberColumn("R1", format="%.2f"),
+        "R2": st.column_config.NumberColumn("R2", format="%.2f"),
+        "S1": st.column_config.NumberColumn("S1", format="%.2f"),
+        "S2": st.column_config.NumberColumn("S2", format="%.2f"),
         "Prev":   st.column_config.NumberColumn("Prev"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
         "RSI":    st.column_config.NumberColumn("RSI",    format="%d"),
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    }, score_max=36)
+    })
 
     # ── LONG-TERM ────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>LONG-TERM INVESTMENTS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_l)} &nbsp; Threshold: {thresh_l}/35</span></div>", unsafe_allow_html=True)
 
-    render_table(df_l, {
+    render_simple_table(df_l, {
+        "Trend":  st.column_config.TextColumn("Trend"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
+        "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
+        "Best Price to sell": st.column_config.NumberColumn("Best Sell", format="%.2f"),
+        "R1": st.column_config.NumberColumn("R1", format="%.2f"),
+        "R2": st.column_config.NumberColumn("R2", format="%.2f"),
+        "S1": st.column_config.NumberColumn("S1", format="%.2f"),
+        "S2": st.column_config.NumberColumn("S2", format="%.2f"),
         "Prev":   st.column_config.NumberColumn("Prev"),
         "1M%":    st.column_config.NumberColumn("1M%",    format="%.2f%%"),
         "Stab":   st.column_config.NumberColumn("Stab",   format="%.1f"),
@@ -1372,8 +1448,44 @@ if scan:
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    }, score_max=35)
+    })
     st.markdown("</div>", unsafe_allow_html=True)
+
+    # ── TREND REVERSALS ───────────────────────────────────────────────────────
+    st.markdown("<hr>", unsafe_allow_html=True)
+    st.markdown("<b>TREND REVERSALS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Changes since last scan</span>", unsafe_allow_html=True)
+
+    # Combine all valid stocks and get their current trend
+    all_stocks_df = pd.concat([df_i, df_s, df_l]).drop_duplicates(subset=['Symbol'])
+    current_trends = pd.Series(all_stocks_df.Trend.values, index=all_stocks_df.Symbol).to_dict()
+
+    selling_to_buying = []
+    buying_to_selling = []
+
+    for symbol, current_trend in current_trends.items():
+        prev_trend = st.session_state.trend_history.get(symbol)
+        if prev_trend and prev_trend != current_trend:
+            if prev_trend == "Selling" and current_trend == "Buying":
+                selling_to_buying.append(f"🟢 {symbol}")
+            elif prev_trend == "Buying" and current_trend == "Selling":
+                buying_to_selling.append(f"🔴 {symbol}")
+
+    # Update history for the next run
+    st.session_state.trend_history.update(current_trends)
+
+    col1, col2 = st.columns(2)
+    with col1:
+        st.markdown("<h6>Selling ➔ Buying</h6>", unsafe_allow_html=True)
+        if selling_to_buying:
+            st.markdown(f"<div class='info-box' style='background-color: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.3); color: #a7f3d0;'>{'&nbsp;·&nbsp;'.join(selling_to_buying)}</div>", unsafe_allow_html=True)
+        else:
+            st.info("No bullish reversals detected.")
+    with col2:
+        st.markdown("<h6>Buying ➔ Selling</h6>", unsafe_allow_html=True)
+        if buying_to_selling:
+            st.markdown(f"<div class='alert-box' style='background-color: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fca5a5;'>{'&nbsp;·&nbsp;'.join(buying_to_selling)}</div>", unsafe_allow_html=True)
+        else:
+            st.info("No bearish reversals detected.")
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
 if is_open:
