@@ -192,7 +192,7 @@ def sync_historical_data(symbols: List[str]):
 
     conn.commit()
     conn.close()
-    ph.success("✅ Sync Complete")
+    ph.success(" Sync Complete")
 
 def save_snapshot(raw: list):
     """Persist today's live prices — uses open/high/low/close from intraday data."""
@@ -372,30 +372,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         "squeeze":     squeeze,
         "triple_bottom": triple_bottom,
     }
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING
-# ══════════════════════════════════════════════════════════════════════════════
-
-def save_snapshot(raw: list):
-    """Persist today's live prices — uses open/high/low/close from intraday data."""
-    if not raw:
-        return
-    today = pkt_now().strftime("%Y-%m-%d")
-    conn  = sqlite3.connect(CFG["DB_PATH"])
-    rows  = []
-    for item in raw:
-        d = item.get("d", [])
-        if len(d) >= 25 and d[0]:
-            rows.append((
-                today, d[0],
-                safe(d[22]), safe(d[23]), safe(d[24]), safe(d[1]),
-                int(safe(d[3]))
-            ))
-    if rows:
-        conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
-    conn.commit()
-    conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # DATA FETCHING
@@ -736,58 +712,8 @@ def score_swing(
     elif hist["momentum"] < -1.0:
         score -= 1
 
-    # 10-day trend
     if hist["trend_pct_10"] > 2:
         score += 2
-
-    # ── LAYER 3: VOLUME FOOTPRINT ─────────────────────────────────────────────
-    vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-    if vol_ratio >= 2.5:
-        score += 4; reasons.append(f"🐋 {vol_ratio:.1f}x Vol")
-    elif vol_ratio >= 1.7:
-        score += 2; reasons.append(f"{vol_ratio:.1f}x Vol")
-    elif vol_ratio >= 1.2:
-        score += 1
-    elif vol_ratio < 0.6:
-        score -= 2  # suspiciously quiet
-
-    # Historical volume accumulation
-    if hist["vol_accumulation"]:
-        score += 2; reasons.append("Accumulation")
-    if hist["vol_trend"] > 20:
-        score += 1; reasons.append("Vol Rising")
-
-    # ── LAYER 4: PRICE PATTERN ────────────────────────────────────────────────
-    # Price position in 1-month range (key for cycle timing)
-    if high1m > low1m > 0:
-        range1m = high1m - low1m
-        pos1m   = (price - low1m) / range1m
-
-        if 0.08 < pos1m < 0.30:
-            score += 4; reasons.append("🎯 Early Cycle")
-        elif 0.30 <= pos1m < 0.55:
-            score += 2; reasons.append("Mid Cycle")
-        elif pos1m > 0.88:
-            score -= 3; reasons.append("⚠️ Near 1M High")
-
-    # Bollinger Band: price in lower-mid zone = room to run
-    bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
-    if 0.2 < bb_pos < 0.6:
-        score += 2; reasons.append("BB Mid-Low")
-    elif bb_pos > 0.90:
-        score -= 2
-
-    # BB Squeeze: compression → explosive move
-    if hist["squeeze"]:
-        score += 5; reasons.append("BB Squeeze")
-
-    # Support proximity
-    if hist["support_level"] > 0 and price > 0:
-        support_gap = (price / hist["support_level"] - 1) * 100
-        if 0 < support_gap < 4:
-            score += 2; reasons.append("At Support")
-        elif support_gap < 0:
-            score -= 2  # below support = danger
 
     # Weekly momentum (not in freefall)
     if chg1w > 2:
@@ -1382,14 +1308,13 @@ if scan:
             st.write("No setups meet current threshold.")
         else:
             # Add score% column
-            # Only show top Elite stocks
             df_top = df.head(7).copy()
             st.dataframe(df_top, column_config=col_cfg, hide_index=True, use_container_width=True)
 
     # ── INTRADAY ──────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1rem; margin-bottom:5px;'><b>INTRADAY SCALPS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_i)} &nbsp; Threshold: {thresh_i}/30 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
 
-    render_simple_table(df_i, {
+    render_table(df_i, {
         "Trend":  st.column_config.TextColumn("Trend"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score",  help="Today's Institutional Score"),
@@ -1405,12 +1330,12 @@ if scan:
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    })
+    }, score_max=30)
 
     # ── SWING ────────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>SWING TRADES</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_s)} &nbsp; Threshold: {thresh_s}/36 &nbsp; Breadth: <span style='color:{'#10b981' if bullish else '#ef4444'}'>{'✅ Bullish' if bullish else '⚠️ Bearish'}</span></span></div>", unsafe_allow_html=True)
 
-    render_simple_table(df_s, {
+    render_table(df_s, {
         "Trend":  st.column_config.TextColumn("Trend"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
@@ -1426,12 +1351,12 @@ if scan:
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    })
+    }, score_max=36)
 
     # ── LONG-TERM ────────────────────────────────────────────────────────────
     st.markdown(f"<div style='margin-top:1.5rem; margin-bottom:5px;'><b>LONG-TERM INVESTMENTS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Results: {len(df_l)} &nbsp; Threshold: {thresh_l}/35</span></div>", unsafe_allow_html=True)
 
-    render_simple_table(df_l, {
+    render_table(df_l, {
         "Trend":  st.column_config.TextColumn("Trend"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
@@ -1448,7 +1373,7 @@ if scan:
         "Reasons": st.column_config.TextColumn("Signals"),
         "Target": st.column_config.NumberColumn("Target", format="%.2f"),
         "Stop":   st.column_config.NumberColumn("Stop",   format="%.2f"),
-    })
+    }, score_max=35)
     st.markdown("</div>", unsafe_allow_html=True)
 
     # ── TREND REVERSALS ───────────────────────────────────────────────────────
@@ -1468,24 +1393,20 @@ if scan:
             if prev_trend == "Selling" and current_trend == "Buying":
                 selling_to_buying.append(f"🟢 {symbol}")
             elif prev_trend == "Buying" and current_trend == "Selling":
-                buying_to_selling.append(f"🔴 {symbol}")
+                buying_to_selling.append(f" {symbol}")
 
     # Update history for the next run
     st.session_state.trend_history.update(current_trends)
 
-    col1, col2 = st.columns(2)
-    with col1:
-        st.markdown("<h6>Selling ➔ Buying</h6>", unsafe_allow_html=True)
+    if selling_to_buying or buying_to_selling:
+        reversal_html = ""
         if selling_to_buying:
-            st.markdown(f"<div class='info-box' style='background-color: rgba(16, 185, 129, 0.1); border-color: rgba(16, 185, 129, 0.3); color: #a7f3d0;'>{'&nbsp;·&nbsp;'.join(selling_to_buying)}</div>", unsafe_allow_html=True)
-        else:
-            st.info("No bullish reversals detected.")
-    with col2:
-        st.markdown("<h6>Buying ➔ Selling</h6>", unsafe_allow_html=True)
+            reversal_html += f"<div style='margin-bottom: 0.5rem;'><b>Bullish:</b> {'&nbsp;·&nbsp;'.join(selling_to_buying)}</div>"
         if buying_to_selling:
-            st.markdown(f"<div class='alert-box' style='background-color: rgba(239, 68, 68, 0.1); border-color: rgba(239, 68, 68, 0.3); color: #fca5a5;'>{'&nbsp;·&nbsp;'.join(buying_to_selling)}</div>", unsafe_allow_html=True)
-        else:
-            st.info("No bearish reversals detected.")
+            reversal_html += f"<div><b>Bearish:</b> {'&nbsp;·&nbsp;'.join(buying_to_selling)}</div>"
+        st.markdown(f"<div class='info-box' style='padding: 0.75rem 1rem;'>{reversal_html}</div>", unsafe_allow_html=True)
+    else:
+        st.info("No trend reversals detected in this scan.")
 
 # ── Auto-refresh ──────────────────────────────────────────────────────────────
 if is_open:
