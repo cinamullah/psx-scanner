@@ -118,6 +118,7 @@ TV_COLS = [
     "EMA5",                      # 25
     "change|1M",                 # 26
     "RSI[1]",                    # 27
+    "low|7D",                    # 28
     "MACD.hist",                 # 28
     "Pivot.M.Classic.Middle",    # 29
     "BB.basis",                  # 30
@@ -1056,6 +1057,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         low_d    = safe(d[24])
         ema5     = safe(d[25])
         chg1m    = safe(d[26])
+        low7d    = safe(d[28]) if len(d) > 28 else low_d
         rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
         macd_h   = safe(d[28]) if len(d) > 28 else (macd - macd_sig)
         bb_basis = safe(d[30]) if len(d) > 30 else (bb_low + bb_high) / 2
@@ -1160,23 +1162,28 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 
         # ── DIP SCANNER ───────────────────────────────────────────────────────
         is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
-        is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02)
+
+        # Improved dip condition: includes check against 7-day low
+        near_7d_low = (low7d > 0 and (price / low7d - 1) * 100 < 5)
+        is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02) or near_7d_low
+
         if is_uptrend and is_dipping and tgt > price > stp:
             rsi_pts = max(0, min(40, (50 - rsi) * 2))
             bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
             bb_pts = max(0, min(30, 30 * (1 - (price - bb_low) / bb_range)))
             vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
             stab_pts = min(15, hist.get("stability", 5) * 1.5) if hist else 7.5
-            
+
             dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts)
-            
+
             dip_reasons = []
             if rsi <= 35: dip_reasons.append("Oversold RSI")
             elif rsi <= 45: dip_reasons.append("RSI Pullback")
             if stoch_k <= 25: dip_reasons.append("Stoch Oversold")
             if price <= bb_low * 1.015: dip_reasons.append("BB Support")
+            if near_7d_low: dip_reasons.append("Near 7D Low")
             if low1m > 0 and price <= low1m * 1.03: dip_reasons.append("Near 1M Low")
-            
+
             dips.append({
                 "Symbol": sym, "Sector": sector,
                 "Price": round(price, 2), "Bias": trend_label,
@@ -1579,7 +1586,7 @@ if scan:
     st.markdown(f'<div class="section-header">Intraday Scalps</div>', unsafe_allow_html=True)
     st.markdown(f'<div class="section-meta">{n_i} setups found &middot; Threshold: {THRESH_INTRA}/100 &middot; Breadth: {breadth_text} &middot; Min. 4/7 layer confluence</div>', unsafe_allow_html=True)
 
-    render_table(df_i, 
+    render_table(df_i,
         ["Symbol", "Price", "Chg%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RV", "RSI", "R1", "S1"],
         {
             "Symbol":  st.column_config.TextColumn("Symbol"),
@@ -1697,10 +1704,10 @@ if scan:
                 if prev_trend != current_trend:
                     reversals.append({
                         "Symbol": symbol,
-                        "Previous Bias": prev_trend,
-                        "Current Bias": current_trend,
-                        "Previous RV": prev_rv,
-                        "Current RV": current_rv,
+                        "Yesterday Trend": prev_trend,
+                        "Today Trend": current_trend,
+                        "Yesterday RV": prev_rv,
+                        "Today RV": current_rv,
                     })
 
         for symbol, row in all_stocks_df.iterrows():
