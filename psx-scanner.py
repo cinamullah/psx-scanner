@@ -1076,10 +1076,8 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 # UI — STREAMLIT
 # ══════════════════════════════════════════════════════════════════════════════
 
-if "positions" not in st.session_state:
-    st.session_state.positions = []
-if "trend_history" not in st.session_state:
-    st.session_state.trend_history = {}
+if "symbol_history" not in st.session_state:
+    st.session_state.symbol_history = {}
 
 
 # ─── CSS ──────────────────────────────────────────────────────────────────────
@@ -1285,14 +1283,14 @@ if scan:
             df_top = df.head(7).copy()
 
             def style_trend(row):
-                prev_trend = st.session_state.trend_history.get(row['Symbol'])
+                prev_trend = st.session_state.symbol_history.get(row['Symbol'], {}).get('trend')
                 current_trend = row['Trend']
                 style = ''
                 if prev_trend:
                     if prev_trend == 'Selling' and current_trend == 'Buying':
-                        style = 'background-color: rgba(16, 185, 129, 0.25);' # Green highlight
+                        style = 'background-color: rgba(16, 185, 129, 0.25);'  # Green highlight
                     elif prev_trend == 'Buying' and current_trend == 'Selling':
-                        style = 'background-color: rgba(239, 68, 68, 0.2);' # Red highlight
+                        style = 'background-color: rgba(239, 68, 68, 0.2);'  # Red highlight
                 return [style if col == 'Trend' else '' for col in df_top.columns]
 
             st.dataframe(
@@ -1384,30 +1382,36 @@ if scan:
     st.markdown("<b>TREND REVERSALS</b> &nbsp;&nbsp; <span style='font-size:0.8rem; color:#64748b;'>Changes since last scan</span>", unsafe_allow_html=True)
 
     # Combine all valid stocks and get their current trend
-    all_stocks_df = pd.concat([df_i, df_s, df_l]).drop_duplicates(subset=['Symbol'])
-    current_trends = pd.Series(all_stocks_df.Trend.values, index=all_stocks_df.Symbol).to_dict()
+    all_stocks_df = pd.concat([df_i, df_s, df_l]).drop_duplicates(subset=['Symbol']).set_index('Symbol')
 
-    selling_to_buying = []
-    buying_to_selling = []
+    reversals = []
+    for symbol, row in all_stocks_df.iterrows():
+        current_trend = row['Trend']
+        current_rv = row.get('RV', 'N/A')
 
-    for symbol, current_trend in current_trends.items():
-        prev_trend = st.session_state.trend_history.get(symbol)
-        if prev_trend and prev_trend != current_trend:
-            if prev_trend == "Selling" and current_trend == "Buying":
-                selling_to_buying.append(f"🟢 {symbol}")
-            elif prev_trend == "Buying" and current_trend == "Selling":
-                buying_to_selling.append(f"🔴 {symbol}")
+        prev_data = st.session_state.symbol_history.get(symbol)
+        if prev_data:
+            prev_trend = prev_data['trend']
+            prev_rv = prev_data.get('rv', 'N/A')
+            if prev_trend != current_trend:
+                reversals.append({
+                    "Symbol": symbol,
+                    "Yesterday Trend": prev_trend,
+                    "Today Trend": current_trend,
+                    "Yesterday RV": prev_rv,
+                    "Today RV": current_rv,
+                })
 
     # Update history for the next run
-    st.session_state.trend_history.update(current_trends)
+    for symbol, row in all_stocks_df.iterrows():
+        st.session_state.symbol_history[symbol] = {
+            'trend': row['Trend'],
+            'rv': row.get('RV', 'N/A')
+        }
 
-    if selling_to_buying or buying_to_selling:
-        reversal_html = ""
-        if selling_to_buying:
-            reversal_html += f"<div style='margin-bottom: 0.5rem;'><b>Bullish:</b> {'&nbsp;·&nbsp;'.join(selling_to_buying)}</div>"
-        if buying_to_selling:
-            reversal_html += f"<div><b>Bearish:</b> {'&nbsp;·&nbsp;'.join(buying_to_selling)}</div>"
-        st.markdown(f"<div class='info-box' style='padding: 0.75rem 1rem;'>{reversal_html}</div>", unsafe_allow_html=True)
+    if reversals:
+        reversals_df = pd.DataFrame(reversals)
+        st.dataframe(reversals_df, hide_index=True, use_container_width=True)
     else:
         st.info("No trend reversals detected in this scan.")
 
