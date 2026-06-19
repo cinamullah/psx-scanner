@@ -192,7 +192,7 @@ def sync_historical_data(symbols: List[str]):
 
     conn.commit()
     conn.close()
-    ph.success(" Sync Complete")
+    ph.success("✅ Sync Complete")
 
 def save_snapshot(raw: list):
     """Persist today's live prices — uses open/high/low/close from intraday data."""
@@ -1316,6 +1316,7 @@ if scan:
 
     render_table(df_i, {
         "Trend":  st.column_config.TextColumn("Trend"),
+        "Price":  st.column_config.NumberColumn("Price",  format="%.2f"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score",  help="Today's Institutional Score"),
         "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
@@ -1337,6 +1338,7 @@ if scan:
 
     render_table(df_s, {
         "Trend":  st.column_config.TextColumn("Trend"),
+        "Price":  st.column_config.NumberColumn("Price",  format="%.2f"),
         "Chg%":   st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
         "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
@@ -1358,6 +1360,7 @@ if scan:
 
     render_table(df_l, {
         "Trend":  st.column_config.TextColumn("Trend"),
+        "Price":  st.column_config.NumberColumn("Price",  format="%.2f"),
         "1W%":    st.column_config.NumberColumn("1W%",    format="%.2f%%"),
         "Score":  st.column_config.NumberColumn("Score"),
         "Best price to buy": st.column_config.NumberColumn("Best Buy", format="%.2f"),
@@ -1393,7 +1396,7 @@ if scan:
             if prev_trend == "Selling" and current_trend == "Buying":
                 selling_to_buying.append(f"🟢 {symbol}")
             elif prev_trend == "Buying" and current_trend == "Selling":
-                buying_to_selling.append(f" {symbol}")
+                buying_to_selling.append(f"🔴 {symbol}")
 
     # Update history for the next run
     st.session_state.trend_history.update(current_trends)
