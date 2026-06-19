@@ -190,6 +190,24 @@ def init_db():
             PRIMARY KEY (date, symbol)
         );
         CREATE INDEX IF NOT EXISTS idx_sym_date ON price_history(symbol, date DESC);
+
+        CREATE TABLE IF NOT EXISTS daily_snapshot (
+            date   TEXT,
+            symbol TEXT,
+            trend  TEXT,
+            rv     REAL,
+            PRIMARY KEY (date, symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
+
+        CREATE TABLE IF NOT EXISTS daily_snapshot (
+            date   TEXT,
+            symbol TEXT,
+            trend  TEXT,
+            rv     REAL,
+            PRIMARY KEY (date, symbol)
+        );
+        CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
     """)
     conn.commit()
     conn.close()
@@ -242,6 +260,82 @@ def save_snapshot(raw: list):
             ))
     if rows:
         conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+def get_yesterday_snapshot() -> Dict[str, Dict]:
+    """Fetches the last available daily snapshot from the database."""
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    today = pkt_now().strftime("%Y-%m-%d")
+
+    # Find the most recent date in the snapshot table that is not today
+    last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
+    cursor = conn.cursor()
+    cursor.execute(last_date_query, (today,))
+    last_date = cursor.fetchone()[0]
+
+    snapshot = {}
+    if last_date:
+        df = pd.read_sql(
+            "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
+            conn, params=(last_date,)
+        )
+        for _, row in df.iterrows():
+            snapshot[row['symbol']] = {
+                'trend': row['trend'],
+                'rv': row['rv']
+            }
+    conn.close()
+    return snapshot
+
+def save_daily_snapshot(df: pd.DataFrame):
+    """Saves the current day's trend and RV data to the snapshot table."""
+    if df.empty:
+        return
+    today = pkt_now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    rows = []
+    for _, row in df.iterrows():
+        rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
+    conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
+    conn.commit()
+    conn.close()
+
+def get_yesterday_snapshot() -> Dict[str, Dict]:
+    """Fetches the last available daily snapshot from the database."""
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    today = pkt_now().strftime("%Y-%m-%d")
+
+    # Find the most recent date in the snapshot table that is not today
+    last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
+    cursor = conn.cursor()
+    cursor.execute(last_date_query, (today,))
+    last_date = cursor.fetchone()[0]
+
+    snapshot = {}
+    if last_date:
+        df = pd.read_sql(
+            "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
+            conn, params=(last_date,)
+        )
+        for _, row in df.iterrows():
+            snapshot[row['symbol']] = {
+                'trend': row['trend'],
+                'rv': row['rv']
+            }
+    conn.close()
+    return snapshot
+
+def save_daily_snapshot(df: pd.DataFrame):
+    """Saves the current day's trend and RV data to the snapshot table."""
+    if df.empty:
+        return
+    today = pkt_now().strftime("%Y-%m-%d")
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    rows = []
+    for _, row in df.iterrows():
+        rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
+    conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
     conn.commit()
     conn.close()
 
@@ -1056,7 +1150,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         high_d   = safe(d[23])
         low_d    = safe(d[24])
         ema5     = safe(d[25])
-        chg1m    = safe(d[26])
+        chg1m    = safe(d[26]) # This is correct
         low7d    = safe(d[28]) if len(d) > 28 else low_d
         rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
         macd_h   = safe(d[28]) if len(d) > 28 else (macd - macd_sig)
@@ -1565,6 +1659,7 @@ if scan:
     if not df_i.empty: df_i = df_i[df_i["Score"] >= THRESH_INTRA].reset_index(drop=True)
     if not df_s.empty: df_s = df_s[df_s["Score"] >= THRESH_SWING].reset_index(drop=True)
     if not df_l.empty: df_l = df_l[df_l["Score"] >= THRESH_LONG].reset_index(drop=True)
+    all_stocks_df = pd.concat([df_i, df_s, df_l, df_d]).drop_duplicates(subset=['Symbol']) if not (df_i.empty and df_s.empty and df_l.empty and df_d.empty) else pd.DataFrame()
     if not df_d.empty: df_d = df_d.reset_index(drop=True)
 
     def render_table(df: pd.DataFrame, col_order: list, col_cfg: dict):
@@ -1687,34 +1782,32 @@ if scan:
 
     # ── TREND REVERSALS ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Trend Reversals</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-meta">Changes detected since last scan</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-meta">Changes detected since yesterday</div>', unsafe_allow_html=True)
 
-    all_stocks_df = pd.concat([df_i, df_s, df_l, df_d]).drop_duplicates(subset=['Symbol']).set_index('Symbol') if not (df_i.empty and df_s.empty and df_l.empty and df_d.empty) else pd.DataFrame()
+    # Get yesterday's data for comparison
+    yesterday_snapshot = get_yesterday_snapshot()
 
     reversals = []
     if not all_stocks_df.empty:
-        for symbol, row in all_stocks_df.iterrows():
+        for _, row in all_stocks_df.iterrows():
+            symbol = row['Symbol']
             current_trend = row['Bias']
             current_rv = row.get('RV', 'N/A')
 
-            prev_data = st.session_state.symbol_history.get(symbol)
-            if prev_data:
-                prev_trend = prev_data['trend']
-                prev_rv = prev_data.get('rv', 'N/A')
+            yesterday_data = yesterday_snapshot.get(symbol)
+            if yesterday_data:
+                prev_trend = yesterday_data['trend']
+                prev_rv = yesterday_data.get('rv', 'N/A')
                 if prev_trend != current_trend:
                     reversals.append({
                         "Symbol": symbol,
                         "Yesterday Trend": prev_trend,
                         "Today Trend": current_trend,
-                        "Yesterday RV": prev_rv,
+                        "Yesterday RV": round(prev_rv, 1) if isinstance(prev_rv, float) else 'N/A',
                         "Today RV": current_rv,
                     })
-
-        for symbol, row in all_stocks_df.iterrows():
-            st.session_state.symbol_history[symbol] = {
-                'trend': row['Bias'],
-                'rv': row.get('RV', 'N/A')
-            }
+        # Save today's data for the next day's comparison
+        save_daily_snapshot(all_stocks_df)
 
     if reversals:
         reversals_df = pd.DataFrame(reversals)
