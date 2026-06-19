@@ -1018,9 +1018,9 @@ def score_longterm(
 
 def process_signals(raw: list, bullish: bool, mkt_chg: float):
     if not raw:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
 
-    intra, swing, long_ = [], [], []
+    intra, swing, long_, dips = [], [], [], []
 
     conn = sqlite3.connect(CFG["DB_PATH"])
 
@@ -1158,9 +1158,41 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 "R:R": _rr(price, tgt, stp),
             })
 
+        # ── DIP SCANNER ───────────────────────────────────────────────────────
+        is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
+        is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02)
+        if is_uptrend and is_dipping and tgt > price > stp:
+            rsi_pts = max(0, min(40, (50 - rsi) * 2))
+            bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
+            bb_pts = max(0, min(30, 30 * (1 - (price - bb_low) / bb_range)))
+            vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
+            stab_pts = min(15, hist.get("stability", 5) * 1.5) if hist else 7.5
+            
+            dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts)
+            
+            dip_reasons = []
+            if rsi <= 35: dip_reasons.append("Oversold RSI")
+            elif rsi <= 45: dip_reasons.append("RSI Pullback")
+            if stoch_k <= 25: dip_reasons.append("Stoch Oversold")
+            if price <= bb_low * 1.015: dip_reasons.append("BB Support")
+            if low1m > 0 and price <= low1m * 1.03: dip_reasons.append("Near 1M Low")
+            
+            dips.append({
+                "Symbol": sym, "Sector": sector,
+                "Price": round(price, 2), "Bias": trend_label,
+                "Chg%": round(change, 2), "1W%": round(chg1w, 2),
+                "Score": dip_score,
+                "Target": tgt, "Stop": stp,
+                "R:R": _rr(price, tgt, stp),
+                "Signals": " | ".join(dip_reasons[:3]) if dip_reasons else "Pullback",
+                "Buy": best_buy, "Sell": best_sell,
+                "RSI": round(rsi, 0),
+                "R1": r1, "S1": s1
+            })
+
     conn.close()
     srt = lambda lst: pd.DataFrame(lst).sort_values("Score", ascending=False).reset_index(drop=True) if lst else pd.DataFrame()
-    return srt(intra), srt(swing), srt(long_)
+    return srt(intra), srt(swing), srt(long_), srt(dips)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1378,9 +1410,16 @@ tbody td {
     .report-title { font-size: 1.1rem; }
     .market-bar { flex-wrap: wrap; gap: 8px; }
     [data-testid="stHorizontalBlock"] {
-        flex-direction: row !important;
-        flex-wrap: nowrap !important;
-        align-items: center !important;
+        flex-wrap: wrap !important;
+    }
+    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {
+        min-width: 100% !important;
+        flex: 1 1 100% !important;
+    }
+    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
+    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3) {
+        min-width: calc(50% - 8px) !important;
+        flex: 1 1 calc(50% - 8px) !important;
     }
 }
 
@@ -1515,10 +1554,11 @@ if scan:
     st.markdown(f'<div class="sector-row">{tiles}</div>', unsafe_allow_html=True)
 
     # ── Run Signals ───────────────────────────────────────────────────────────
-    df_i, df_s, df_l = process_signals(raw, bullish, avg_chg)
+    df_i, df_s, df_l, df_d = process_signals(raw, bullish, avg_chg)
     if not df_i.empty: df_i = df_i[df_i["Score"] >= THRESH_INTRA].reset_index(drop=True)
     if not df_s.empty: df_s = df_s[df_s["Score"] >= THRESH_SWING].reset_index(drop=True)
     if not df_l.empty: df_l = df_l[df_l["Score"] >= THRESH_LONG].reset_index(drop=True)
+    if not df_d.empty: df_d = df_d.reset_index(drop=True)
 
     def render_table(df: pd.DataFrame, col_order: list, col_cfg: dict):
         """Render a clean paper-style table with ordered columns."""
@@ -1612,11 +1652,37 @@ if scan:
         }
     )
 
+    # ── STOCKS ON DIP ─────────────────────────────────────────────────────────
+    n_d = len(df_d)
+    st.markdown(f'<div class="section-header">Stocks on Dip</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-meta">{n_d} setups found &middot; Filter: Price > EMA50 (Uptrend) &middot; Pullback</div>', unsafe_allow_html=True)
+
+    render_table(df_d,
+        ["Symbol", "Price", "Chg%", "1W%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RSI", "R1", "S1"],
+        {
+            "Symbol":  st.column_config.TextColumn("Symbol"),
+            "Price":   st.column_config.NumberColumn("Price", format="%.2f"),
+            "Chg%":    st.column_config.NumberColumn("Chg%", format="%.2f%%"),
+            "1W%":     st.column_config.NumberColumn("1W%", format="%.2f%%"),
+            "Score":   st.column_config.NumberColumn("Score", format="%d", help="Dip Score (higher = better quality dip)"),
+            "Bias":    st.column_config.TextColumn("Bias"),
+            "R:R":     st.column_config.NumberColumn("R:R", format="%.2f"),
+            "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop", format="%.2f"),
+            "Signals": st.column_config.TextColumn("Signals"),
+            "Buy":     st.column_config.NumberColumn("Buy", format="%.2f"),
+            "Sell":    st.column_config.NumberColumn("Sell", format="%.2f"),
+            "RSI":     st.column_config.NumberColumn("RSI", format="%d"),
+            "R1":      st.column_config.NumberColumn("R1", format="%.2f"),
+            "S1":      st.column_config.NumberColumn("S1", format="%.2f"),
+        }
+    )
+
     # ── TREND REVERSALS ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Trend Reversals</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-meta">Changes detected since last scan</div>', unsafe_allow_html=True)
 
-    all_stocks_df = pd.concat([df_i, df_s, df_l]).drop_duplicates(subset=['Symbol']).set_index('Symbol') if not (df_i.empty and df_s.empty and df_l.empty) else pd.DataFrame()
+    all_stocks_df = pd.concat([df_i, df_s, df_l, df_d]).drop_duplicates(subset=['Symbol']).set_index('Symbol') if not (df_i.empty and df_s.empty and df_l.empty and df_d.empty) else pd.DataFrame()
 
     reversals = []
     if not all_stocks_df.empty:
