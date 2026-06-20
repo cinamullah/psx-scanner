@@ -119,9 +119,9 @@ TV_COLS = [
     "change|1M",                 # 26
     "RSI[1]",                    # 27
     "low|7D",                    # 28
-    "MACD.hist",                 # 28
-    "Pivot.M.Classic.Middle",    # 29
-    "BB.basis",                  # 30
+    "MACD.hist",                 # 29
+    "Pivot.M.Classic.Middle",    # 30
+    "BB.basis",                  # 31
 ]
 
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
@@ -150,12 +150,11 @@ def safe(val, default=0.0):
     except (TypeError, ValueError):
         return default
 
-def _rr(price: float, target: float, stop: float) -> str:
+def _rr(price: float, target: float, stop: float) -> float:
     denom = price - stop
     if denom <= 0 or target <= price:
-        return "—"
-    ratio = (target - price) / denom
-    return f"1:{ratio:.1f}"
+        return 0.0
+    return round((target - price) / denom, 2)
 
 def _clamp(value: float, low: float, high: float) -> float:
     """Clamp a value within bounds."""
@@ -178,39 +177,32 @@ def _grade(score: int, layers_active: int) -> str:
 
 def init_db():
     conn = sqlite3.connect(CFG["DB_PATH"])
-    conn.executescript("""
-        CREATE TABLE IF NOT EXISTS price_history (
-            date   TEXT,
-            symbol TEXT,
-            open   REAL,
-            high   REAL,
-            low    REAL,
-            close  REAL,
-            volume INTEGER,
-            PRIMARY KEY (date, symbol)
-        );
-        CREATE INDEX IF NOT EXISTS idx_sym_date ON price_history(symbol, date DESC);
+    try:
+        with conn:
+            conn.executescript("""
+                CREATE TABLE IF NOT EXISTS price_history (
+                    date   TEXT,
+                    symbol TEXT,
+                    open   REAL,
+                    high   REAL,
+                    low    REAL,
+                    close  REAL,
+                    volume INTEGER,
+                    PRIMARY KEY (date, symbol)
+                );
+                CREATE INDEX IF NOT EXISTS idx_sym_date ON price_history(symbol, date DESC);
 
-        CREATE TABLE IF NOT EXISTS daily_snapshot (
-            date   TEXT,
-            symbol TEXT,
-            trend  TEXT,
-            rv     REAL,
-            PRIMARY KEY (date, symbol)
-        );
-        CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
-
-        CREATE TABLE IF NOT EXISTS daily_snapshot (
-            date   TEXT,
-            symbol TEXT,
-            trend  TEXT,
-            rv     REAL,
-            PRIMARY KEY (date, symbol)
-        );
-        CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
-    """)
-    conn.commit()
-    conn.close()
+                CREATE TABLE IF NOT EXISTS daily_snapshot (
+                    date   TEXT,
+                    symbol TEXT,
+                    trend  TEXT,
+                    rv     REAL,
+                    PRIMARY KEY (date, symbol)
+                );
+                CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
+            """)
+    finally:
+        conn.close()
 
 def sync_historical_data(symbols: List[str]):
     """Optimized batch download from Yahoo Finance."""
@@ -224,24 +216,25 @@ def sync_historical_data(symbols: List[str]):
     df = yf.download(tickers, start=start, end=end, group_by='ticker', progress=False)
 
     conn = sqlite3.connect(CFG["DB_PATH"])
-    for sym in symbols:
-        try:
-            ticker_df = df[f"{sym}.KA"].dropna().reset_index()
-            if ticker_df.empty: continue
+    try:
+        for sym in symbols:
+            try:
+                ticker_df = df[f"{sym}.KA"].dropna().reset_index()
+                if ticker_df.empty: continue
 
-            rows = []
-            for _, r in ticker_df.iterrows():
-                rows.append((
-                    r["Date"].strftime("%Y-%m-%d"), sym,
-                    float(r["Open"]), float(r["High"]),
-                    float(r["Low"]), float(r["Close"]), int(r["Volume"])
-                ))
-            conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
-        except Exception: continue
-
-    conn.commit()
-    conn.close()
-    ph.empty()
+                rows = []
+                for _, r in ticker_df.iterrows():
+                    rows.append((
+                        r["Date"].strftime("%Y-%m-%d"), sym,
+                        float(r["Open"]), float(r["High"]),
+                        float(r["Low"]), float(r["Close"]), int(r["Volume"])
+                    ))
+                with conn:
+                    conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+            except Exception: continue
+    finally:
+        conn.close()
+        ph.empty()
 
 def save_snapshot(raw: list):
     """Persist today's live prices."""
@@ -249,44 +242,48 @@ def save_snapshot(raw: list):
         return
     today = pkt_now().strftime("%Y-%m-%d")
     conn  = sqlite3.connect(CFG["DB_PATH"])
-    rows  = []
-    for item in raw:
-        d = item.get("d", [])
-        if len(d) >= 25 and d[0]:
-            rows.append((
-                today, d[0],
-                safe(d[22]), safe(d[23]), safe(d[24]), safe(d[1]),
-                int(safe(d[3]))
-            ))
-    if rows:
-        conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
-    conn.commit()
-    conn.close()
+    try:
+        rows  = []
+        for item in raw:
+            d = item.get("d", [])
+            if len(d) >= 25 and d[0]:
+                rows.append((
+                    today, d[0],
+                    safe(d[22]), safe(d[23]), safe(d[24]), safe(d[1]),
+                    int(safe(d[3]))
+                ))
+        if rows:
+            with conn:
+                conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+    finally:
+        conn.close()
 
 def get_yesterday_snapshot() -> Dict[str, Dict]:
     """Fetches the last available daily snapshot from the database."""
     conn = sqlite3.connect(CFG["DB_PATH"])
-    today = pkt_now().strftime("%Y-%m-%d")
+    try:
+        today = pkt_now().strftime("%Y-%m-%d")
 
-    # Find the most recent date in the snapshot table that is not today
-    last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
-    cursor = conn.cursor()
-    cursor.execute(last_date_query, (today,))
-    last_date = cursor.fetchone()[0]
+        # Find the most recent date in the snapshot table that is not today
+        last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
+        cursor = conn.cursor()
+        cursor.execute(last_date_query, (today,))
+        last_date = cursor.fetchone()[0]
 
-    snapshot = {}
-    if last_date:
-        df = pd.read_sql(
-            "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
-            conn, params=(last_date,)
-        )
-        for _, row in df.iterrows():
-            snapshot[row['symbol']] = {
-                'trend': row['trend'],
-                'rv': row['rv']
-            }
-    conn.close()
-    return snapshot
+        snapshot = {}
+        if last_date:
+            df = pd.read_sql(
+                "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
+                conn, params=(last_date,)
+            )
+            for _, row in df.iterrows():
+                snapshot[row['symbol']] = {
+                    'trend': row['trend'],
+                    'rv': row['rv']
+                }
+        return snapshot
+    finally:
+        conn.close()
 
 def save_daily_snapshot(df: pd.DataFrame):
     """Saves the current day's trend and RV data to the snapshot table."""
@@ -294,50 +291,14 @@ def save_daily_snapshot(df: pd.DataFrame):
         return
     today = pkt_now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(CFG["DB_PATH"])
-    rows = []
-    for _, row in df.iterrows():
-        rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
-    conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
-    conn.commit()
-    conn.close()
-
-def get_yesterday_snapshot() -> Dict[str, Dict]:
-    """Fetches the last available daily snapshot from the database."""
-    conn = sqlite3.connect(CFG["DB_PATH"])
-    today = pkt_now().strftime("%Y-%m-%d")
-
-    # Find the most recent date in the snapshot table that is not today
-    last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
-    cursor = conn.cursor()
-    cursor.execute(last_date_query, (today,))
-    last_date = cursor.fetchone()[0]
-
-    snapshot = {}
-    if last_date:
-        df = pd.read_sql(
-            "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
-            conn, params=(last_date,)
-        )
+    try:
+        rows = []
         for _, row in df.iterrows():
-            snapshot[row['symbol']] = {
-                'trend': row['trend'],
-                'rv': row['rv']
-            }
-    conn.close()
-    return snapshot
-
-def save_daily_snapshot(df: pd.DataFrame):
-    """Saves the current day's trend and RV data to the snapshot table."""
-    if df.empty:
-        return
-    today = pkt_now().strftime("%Y-%m-%d")
-    conn = sqlite3.connect(CFG["DB_PATH"])
-    rows = []
-    for _, row in df.iterrows():
-        rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
-    conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
-    conn.commit()
-    conn.close()
+            rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
+        with conn:
+            conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
+    finally:
+        conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
 # HISTORICAL ANALYTICS ENGINE
@@ -525,19 +486,43 @@ def fetch_live() -> list:
 def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
     """Calculates breadth from existing live data."""
     chgs = []
+    prices = []
+    highs = []
+    lows = []
+    total_volume = 0
     adv, dec = 0, 0
-    kse = {"close": 0.0, "change": 0.0, "high": 0.0, "low": 0.0, "volume": 0}
     for item in raw:
         d = item.get("d", [])
+        if not d or len(d) < 25:
+            continue
         sym = d[0]
         chg = safe(d[2])
+        price = safe(d[1])
+        vol = safe(d[3])
+        high = safe(d[23])
+        low = safe(d[24])
         if sym in KSE100:
             chgs.append(chg)
+            prices.append(price)
+            if high > 0: highs.append(high)
+            if low > 0: lows.append(low)
+            total_volume += vol
             if chg > 0: adv += 1
             elif chg < 0: dec += 1
 
     avg = sum(chgs) / len(chgs) if chgs else 0.0
+    avg_price = sum(prices) / len(prices) if prices else 0.0
+    max_high = max(highs) if highs else 0.0
+    min_low = min(lows) if lows else 0.0
     bull = avg > CFG["BREADTH_MIN"] and adv > dec
+    
+    kse = {
+        "close": avg_price,
+        "change": avg,
+        "high": max_high,
+        "low": min_low,
+        "volume": total_volume
+    }
     return avg, bull, adv, dec, kse
 
 @st.cache_data(ttl=60, show_spinner=False)
@@ -596,7 +581,7 @@ def score_intraday(
     if price < CFG["MIN_PRICE"]:       return 0, [], 0, 0, "D", 0
     if vol < CFG["MIN_VOLUME"]:        return 0, [], 0, 0, "D", 0
     if vol_ratio < 0.7:               return 0, [], 0, 0, "D", 0
-    if price < vwap * 0.995:          return 0, [], 0, 0, "D", 0
+    if price < vwap * 0.98:            return 0, [], 0, 0, "D", 0
 
     # ── LAYER 1: TREND STRUCTURE (max 20) ─────────────────────────────────────
     L1 = 0
@@ -646,7 +631,7 @@ def score_intraday(
     # ── LAYER 3: VOLUME FOOTPRINT (max 15) ────────────────────────────────────
     L3 = 0
     if vol_ratio >= CFG["INST_VOL_X"]:
-        L3 += 12; reasons.append(f"{vol_ratio:.1f}x Inst. Volume")
+        L3 += 12; reasons.append(f"{vol_ratio:.1f}x High Volume")
     elif vol_ratio >= 2.0:
         L3 += 8; reasons.append(f"{vol_ratio:.1f}x Volume")
     elif vol_ratio >= 1.5:
@@ -662,7 +647,7 @@ def score_intraday(
     # ── LAYER 4: PRICE PATTERN (max 15) ───────────────────────────────────────
     L4 = 0
     vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
-    if 0 < vwap_dist < 0.5:
+    if -0.5 < vwap_dist < 0.5:
         L4 += 8; reasons.append("VWAP Bounce")
     elif 0.5 <= vwap_dist < 1.2:
         L4 += 4; reasons.append("VWAP Edge")
@@ -825,7 +810,7 @@ def score_swing(
     L3 = 0
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if vol_ratio >= 2.5:
-        L3 += 10; reasons.append(f"{vol_ratio:.1f}x Inst. Volume")
+        L3 += 10; reasons.append(f"{vol_ratio:.1f}x High Volume")
     elif vol_ratio >= 1.7:
         L3 += 6; reasons.append(f"{vol_ratio:.1f}x Volume")
     elif vol_ratio >= 1.2:
@@ -974,7 +959,7 @@ def score_longterm(
         if hist["triple_bottom"] and dist_low < 5:
             L2 += 14; reasons.append("Triple Bottom")
         elif 0.3 < dist_low < 4 and rsi > 28:
-            L2 += 8; reasons.append("Double Bottom")
+            L2 += 8; reasons.append("Near Monthly Low")
         elif dist_low < 10:
             L2 += 5; reasons.append("Value Zone")
 
@@ -1118,180 +1103,184 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
     intra, swing, long_, dips = [], [], [], []
 
     conn = sqlite3.connect(CFG["DB_PATH"])
+    try:
+        for item in raw:
+            d = item.get("d", [])
+            if len(d) < 27 or not d[0]:
+                continue
 
-    for item in raw:
-        d = item.get("d", [])
-        if len(d) < 27 or not d[0]:
-            continue
+            sym      = d[0]
+            price    = safe(d[1])
+            change   = safe(d[2])
+            vol      = safe(d[3])
+            rv       = safe(d[4])
+            avg_vol  = safe(d[5])
+            rsi      = safe(d[6], 50)
+            macd     = safe(d[7])
+            macd_sig = safe(d[8])
+            bb_low   = safe(d[9])
+            bb_high  = safe(d[10])
+            ema20    = safe(d[11])
+            ema50    = safe(d[12])
+            chg1w    = safe(d[13])
+            high1m   = safe(d[14])
+            low1m    = safe(d[15])
+            vwap     = safe(d[16]) or price
+            ema10    = safe(d[17])
+            adx      = safe(d[18])
+            atr      = safe(d[19])
+            stoch_k  = safe(d[20], 50)
+            stoch_d  = safe(d[21], 50)
+            open_p   = safe(d[22])
+            high_d   = safe(d[23])
+            low_d    = safe(d[24])
+            ema5     = safe(d[25])
+            chg1m    = safe(d[26]) # This is correct
+            low7d    = safe(d[28]) if len(d) > 28 else low_d
+            rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
+            macd_h   = safe(d[29]) if len(d) > 29 else (macd - macd_sig)
+            bb_basis = safe(d[31]) if len(d) > 31 else (bb_low + bb_high) / 2
 
-        sym      = d[0]
-        price    = safe(d[1])
-        change   = safe(d[2])
-        vol      = safe(d[3])
-        rv       = safe(d[4])
-        avg_vol  = safe(d[5])
-        rsi      = safe(d[6], 50)
-        macd     = safe(d[7])
-        macd_sig = safe(d[8])
-        bb_low   = safe(d[9])
-        bb_high  = safe(d[10])
-        ema20    = safe(d[11])
-        ema50    = safe(d[12])
-        chg1w    = safe(d[13])
-        high1m   = safe(d[14])
-        low1m    = safe(d[15])
-        vwap     = safe(d[16]) or price
-        ema10    = safe(d[17])
-        adx      = safe(d[18])
-        atr      = safe(d[19])
-        stoch_k  = safe(d[20], 50)
-        stoch_d  = safe(d[21], 50)
-        open_p   = safe(d[22])
-        high_d   = safe(d[23])
-        low_d    = safe(d[24])
-        ema5     = safe(d[25])
-        chg1m    = safe(d[26]) # This is correct
-        low7d    = safe(d[28]) if len(d) > 28 else low_d
-        rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
-        macd_h   = safe(d[28]) if len(d) > 28 else (macd - macd_sig)
-        bb_basis = safe(d[30]) if len(d) > 30 else (bb_low + bb_high) / 2
+            if price <= 0 or avg_vol <= 0:
+                continue
 
-        if price <= 0 or avg_vol <= 0:
-            continue
+            sector = SYM_SECTOR.get(sym, "Misc")
+            hist = get_hist_metrics(sym, conn)
 
-        sector = SYM_SECTOR.get(sym, "Misc")
-        hist = get_hist_metrics(sym, conn)
+            # Standard Pivot Calculation
+            h_piv, l_piv = (high_d if high_d > 0 else price), (low_d if low_d > 0 else price)
+            p_piv = (h_piv + l_piv + price) / 3
+            r1, s1 = round(2 * p_piv - l_piv, 2), round(2 * p_piv - h_piv, 2)
+            r2, s2 = round(p_piv + (h_piv - l_piv), 2), round(p_piv - (h_piv - l_piv), 2)
 
-        # Standard Pivot Calculation
-        h_piv, l_piv = (high_d if high_d > 0 else price), (low_d if low_d > 0 else price)
-        p_piv = (h_piv + l_piv + price) / 3
-        r1, s1 = round(2 * p_piv - l_piv, 2), round(2 * p_piv - h_piv, 2)
-        r2, s2 = round(p_piv + (h_piv - l_piv), 2), round(p_piv - (h_piv - l_piv), 2)
+            best_buy = s1 if price > s1 else s2
+            best_sell = r1 if price < r1 else r2
 
-        best_buy = s1 if price > s1 else s2
-        best_sell = r1 if price < r1 else r2
+            # Trend Bias
+            is_buying = (price > vwap) and (macd > macd_sig) and (rsi > 50)
+            trend_label = "BUYING" if is_buying else "SELLING"
 
-        # Trend Bias
-        is_buying = (price > vwap) and (macd > macd_sig) and (rsi > 50)
-        trend_label = "BUYING" if is_buying else "SELLING"
+            # Minimum liquidity
+            if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
+                continue
 
-        # Minimum liquidity
-        if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
-            continue
+            # ── INTRADAY ──────────────────────────────────────────────────────────
+            sc, rs, tgt, stp, grd, la = score_intraday(
+                price, change, rsi, macd, macd_sig, macd_h,
+                ema5, ema10, vwap, adx, stoch_k, stoch_d,
+                vol, avg_vol, atr, bb_low, bb_high, bb_basis,
+                open_p, high_d, low_d,
+                bullish, mkt_chg, hist, rsi_prev
+            )
+            if sc >= THRESH_INTRA and tgt > price > stp:
+                intra.append({
+                    "Symbol": sym, "Sector": sector,
+                    "Price": round(price, 2), "Bias": trend_label,
+                    "Chg%": round(change, 2),
+                    "Score": sc, "Grade": grd,
+                    "Layers": f"{la}/7",
+                    "Buy": best_buy, "Sell": best_sell,
+                    "R1": r1, "S1": s1,
+                    "RV": round(rv, 1),
+                    "RSI": round(rsi, 0),
+                    "Signals": " | ".join(rs[:4]),
+                    "Target": tgt, "Stop": stp,
+                    "R:R": _rr(price, tgt, stp),
+                })
 
-        # ── INTRADAY ──────────────────────────────────────────────────────────
-        sc, rs, tgt, stp, grd, la = score_intraday(
-            price, change, rsi, macd, macd_sig, macd_h,
-            ema5, ema10, vwap, adx, stoch_k, stoch_d,
-            vol, avg_vol, atr, bb_low, bb_high, bb_basis,
-            open_p, high_d, low_d,
-            bullish, mkt_chg, hist, rsi_prev
-        )
-        if sc >= THRESH_INTRA and tgt > price > stp:
-            intra.append({
-                "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Bias": trend_label,
-                "Chg%": round(change, 2),
-                "Score": sc, "Grade": grd,
-                "Layers": f"{la}/7",
-                "Buy": best_buy, "Sell": best_sell,
-                "R1": r1, "S1": s1,
-                "RV": round(rv, 1),
-                "RSI": round(rsi, 0),
-                "Signals": " | ".join(rs[:4]),
-                "Target": tgt, "Stop": stp,
-                "R:R": _rr(price, tgt, stp),
-            })
+            # ── SWING ─────────────────────────────────────────────────────────────
+            sc, rs, tgt, stp, grd, la = score_swing(
+                price, change, rsi, macd, macd_sig, macd_h,
+                ema5, ema10, ema20, ema50, vwap,
+                adx, atr, stoch_k, stoch_d,
+                bb_low, bb_high, bb_basis,
+                vol, avg_vol, chg1w, chg1m, low1m, high1m,
+                bullish, mkt_chg, rsi_prev, hist
+            )
+            if sc >= THRESH_SWING and tgt > price > stp:
+                swing.append({
+                    "Symbol": sym, "Sector": sector,
+                    "Price": round(price, 2), "Bias": trend_label,
+                    "Chg%": round(change, 2),
+                    "Score": sc, "Grade": grd,
+                    "Layers": f"{la}/7",
+                    "Buy": best_buy, "Sell": best_sell,
+                    "R1": r1, "S1": s1,
+                    "1W%": round(chg1w, 2),
+                    "RSI": round(rsi, 0),
+                    "Signals": " | ".join(rs[:3]),
+                    "Target": tgt, "Stop": stp,
+                    "R:R": _rr(price, tgt, stp),
+                })
 
-        # ── SWING ─────────────────────────────────────────────────────────────
-        sc, rs, tgt, stp, grd, la = score_swing(
-            price, change, rsi, macd, macd_sig, macd_h,
-            ema5, ema10, ema20, ema50, vwap,
-            adx, atr, stoch_k, stoch_d,
-            bb_low, bb_high, bb_basis,
-            vol, avg_vol, chg1w, chg1m, low1m, high1m,
-            bullish, mkt_chg, rsi_prev, hist
-        )
-        if sc >= THRESH_SWING and tgt > price > stp:
-            swing.append({
-                "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Bias": trend_label,
-                "Chg%": round(change, 2),
-                "Score": sc, "Grade": grd,
-                "Layers": f"{la}/7",
-                "Buy": best_buy, "Sell": best_sell,
-                "R1": r1, "S1": s1,
-                "1W%": round(chg1w, 2),
-                "RSI": round(rsi, 0),
-                "Signals": " | ".join(rs[:3]),
-                "Target": tgt, "Stop": stp,
-                "R:R": _rr(price, tgt, stp),
-            })
+            # ── LONG-TERM ─────────────────────────────────────────────────────────
+            perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0.0
+            sc, rs, tgt, stp, grd, la = score_longterm(
+                price, rsi, macd, macd_sig, macd_h,
+                ema20, ema50, stoch_k, stoch_d,
+                bb_low, bb_high, bb_basis,
+                vol, avg_vol, chg1w, chg1m, low1m, high1m,
+                sector, rsi_prev, hist
+            )
+            if sc >= THRESH_LONG and tgt > price > stp:
+                long_.append({
+                    "Symbol": sym, "Sector": sector,
+                    "Price": round(price, 2), "Bias": trend_label,
+                    "1W%": round(chg1w, 2),
+                    "Score": sc, "Grade": grd,
+                    "Layers": f"{la}/7",
+                    "Buy": best_buy, "Sell": best_sell,
+                    "R1": r1, "S1": s1,
+                    "1M%": round(perf1m, 2),
+                    "Stab": round(hist["stability"], 1),
+                    "RSI": round(rsi, 0),
+                    "Signals": " | ".join(rs[:3]),
+                    "Target": tgt, "Stop": stp,
+                    "R:R": _rr(price, tgt, stp),
+                })
 
-        # ── LONG-TERM ─────────────────────────────────────────────────────────
-        perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0.0
-        sc, rs, tgt, stp, grd, la = score_longterm(
-            price, rsi, macd, macd_sig, macd_h,
-            ema20, ema50, stoch_k, stoch_d,
-            bb_low, bb_high, bb_basis,
-            vol, avg_vol, chg1w, chg1m, low1m, high1m,
-            sector, rsi_prev, hist
-        )
-        if sc >= THRESH_LONG and tgt > price > stp:
-            long_.append({
-                "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Bias": trend_label,
-                "1W%": round(chg1w, 2),
-                "Score": sc, "Grade": grd,
-                "Layers": f"{la}/7",
-                "Buy": best_buy, "Sell": best_sell,
-                "R1": r1, "S1": s1,
-                "1M%": round(perf1m, 2),
-                "Stab": round(hist["stability"], 1),
-                "RSI": round(rsi, 0),
-                "Signals": " | ".join(rs[:3]),
-                "Target": tgt, "Stop": stp,
-                "R:R": _rr(price, tgt, stp),
-            })
+            # ── DIP SCANNER ───────────────────────────────────────────────────────
+            is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
 
-        # ── DIP SCANNER ───────────────────────────────────────────────────────
-        is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
+            # Improved dip condition: includes check against 7-day low
+            near_7d_low = (low7d > 0 and (price / low7d - 1) * 100 < 5)
+            is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02) or near_7d_low
 
-        # Improved dip condition: includes check against 7-day low
-        near_7d_low = (low7d > 0 and (price / low7d - 1) * 100 < 5)
-        is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02) or near_7d_low
+            if is_uptrend and is_dipping:
+                dip_stop, dip_eff_atr = _compute_atr_stop(price, atr, hist.get("atr_20", 0) if hist else 0, 1.0)
+                dip_target = round(price * (1 + _clamp((2.0 * dip_eff_atr / price) * 100, 3.0, 8.0) / 100), 2)
 
-        if is_uptrend and is_dipping and tgt > price > stp:
-            rsi_pts = max(0, min(40, (50 - rsi) * 2))
-            bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
-            bb_pts = max(0, min(30, 30 * (1 - (price - bb_low) / bb_range)))
-            vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
-            stab_pts = min(15, hist.get("stability", 5) * 1.5) if hist else 7.5
+                if dip_target > price > dip_stop:
+                    rsi_pts = max(0, min(40, (50 - rsi) * 2))
+                    bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
+                    bb_pts = max(0, min(30, 30 * (1 - (price - bb_low) / bb_range)))
+                    vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
+                    stab_pts = min(15, hist.get("stability", 5) * 1.5) if hist else 7.5
 
-            dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts)
+                    dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts)
 
-            dip_reasons = []
-            if rsi <= 35: dip_reasons.append("Oversold RSI")
-            elif rsi <= 45: dip_reasons.append("RSI Pullback")
-            if stoch_k <= 25: dip_reasons.append("Stoch Oversold")
-            if price <= bb_low * 1.015: dip_reasons.append("BB Support")
-            if near_7d_low: dip_reasons.append("Near 7D Low")
-            if low1m > 0 and price <= low1m * 1.03: dip_reasons.append("Near 1M Low")
+                    dip_reasons = []
+                    if rsi <= 35: dip_reasons.append("Oversold RSI")
+                    elif rsi <= 45: dip_reasons.append("RSI Pullback")
+                    if stoch_k <= 25: dip_reasons.append("Stoch Oversold")
+                    if price <= bb_low * 1.015: dip_reasons.append("BB Support")
+                    if near_7d_low: dip_reasons.append("Near 7D Low")
+                    if low1m > 0 and price <= low1m * 1.03: dip_reasons.append("Near 1M Low")
 
-            dips.append({
-                "Symbol": sym, "Sector": sector,
-                "Price": round(price, 2), "Bias": trend_label,
-                "Chg%": round(change, 2), "1W%": round(chg1w, 2),
-                "Score": dip_score,
-                "Target": tgt, "Stop": stp,
-                "R:R": _rr(price, tgt, stp),
-                "Signals": " | ".join(dip_reasons[:3]) if dip_reasons else "Pullback",
-                "Buy": best_buy, "Sell": best_sell,
-                "RSI": round(rsi, 0),
-                "R1": r1, "S1": s1
-            })
-
-    conn.close()
+                    dips.append({
+                        "Symbol": sym, "Sector": sector,
+                        "Price": round(price, 2), "Bias": trend_label,
+                        "Chg%": round(change, 2), "1W%": round(chg1w, 2),
+                        "Score": dip_score,
+                        "Target": dip_target, "Stop": dip_stop,
+                        "R:R": _rr(price, dip_target, dip_stop),
+                        "Signals": " | ".join(dip_reasons[:3]) if dip_reasons else "Pullback",
+                        "Buy": best_buy, "Sell": best_sell,
+                        "RSI": round(rsi, 0),
+                        "R1": r1, "S1": s1
+                    })
+    finally:
+        conn.close()
     srt = lambda lst: pd.DataFrame(lst).sort_values("Score", ascending=False).reset_index(drop=True) if lst else pd.DataFrame()
     return srt(intra), srt(swing), srt(long_), srt(dips)
 
@@ -1300,8 +1289,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 # UI — DARK REPORT STYLE
 # ══════════════════════════════════════════════════════════════════════════════
 
-if "symbol_history" not in st.session_state:
-    st.session_state.symbol_history = {}
+
 
 # ─── CSS: Dark Report ────────────────────────────────────────────────────────
 st.markdown("""
@@ -1824,7 +1812,14 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Auto-refresh ──────────────────────────────────────────────────────────────
+# ── Auto-refresh (non-blocking) ──────────────────────────────────────────────
 if is_open:
-    time.sleep(CFG["REFRESH_SEC"])
-    st.rerun()
+    import streamlit.components.v1 as components
+    components.html(
+        f"""<script>
+            setTimeout(function() {{
+                window.parent.location.reload();
+            }}, {CFG["REFRESH_SEC"] * 1000});
+        </script>""",
+        height=0,
+    )
