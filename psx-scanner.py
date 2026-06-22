@@ -37,7 +37,7 @@ CFG = {
     "INST_VOL_X":    2.5,
     "BREADTH_MIN":   0.0,
     "DB_PATH":       os.path.join(BASE_DIR, "psx_elite.db"),
-    "HIST_DAYS":     260,          # ↑ was 90 — covers full trading year
+    "HIST_DAYS":     120,          
     "REGIME_PERIOD": 200,          # MA period for market regime detection
 }
 
