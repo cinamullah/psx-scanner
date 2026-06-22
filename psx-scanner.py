@@ -208,30 +208,43 @@ def sync_historical_data(symbols: List[str]):
     """Optimized batch download from Yahoo Finance."""
     end = datetime.now()
     start = end - timedelta(days=CFG["HIST_DAYS"])
-    tickers = [f"{s}.KA" for s in symbols]
 
     ph = st.empty()
     ph.caption("Fetching market history...")
 
-    df = yf.download(tickers, start=start, end=end, group_by='ticker', progress=False)
-
     conn = sqlite3.connect(CFG["DB_PATH"])
     try:
+        # Download in batches to handle both single and multi-ticker responses
         for sym in symbols:
             try:
-                ticker_df = df[f"{sym}.KA"].dropna().reset_index()
-                if ticker_df.empty: continue
+                ticker_str = f"{sym}.KA"
+                raw = yf.download(ticker_str, start=start, end=end, progress=False, auto_adjust=True)
+                if raw is None or raw.empty:
+                    continue
+
+                # Flatten MultiIndex columns if present (yfinance >=0.2 with multiple tickers)
+                if isinstance(raw.columns, pd.MultiIndex):
+                    raw.columns = raw.columns.get_level_values(0)
+
+                raw = raw.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).reset_index()
 
                 rows = []
-                for _, r in ticker_df.iterrows():
+                for _, r in raw.iterrows():
+                    date_val = r["Date"]
+                    if hasattr(date_val, "strftime"):
+                        date_str = date_val.strftime("%Y-%m-%d")
+                    else:
+                        date_str = str(date_val)[:10]
                     rows.append((
-                        r["Date"].strftime("%Y-%m-%d"), sym,
+                        date_str, sym,
                         float(r["Open"]), float(r["High"]),
                         float(r["Low"]), float(r["Close"]), int(r["Volume"])
                     ))
-                with conn:
-                    conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
-            except Exception: continue
+                if rows:
+                    with conn:
+                        conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+            except Exception:
+                continue
     finally:
         conn.close()
         ph.empty()
@@ -468,20 +481,31 @@ def _session():
 
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_live() -> list:
-    payload = {
+    base_payload = {
         "sort":    {"sortBy": "volume", "sortOrder": "desc"},
-        "filter":  [{"left": "name", "operation": "in_range", "right": KSE100}],
         "markets": ["pakistan"],
         "columns": TV_COLS,
         "range":   [0, 500],
     }
-    try:
-        r = _session().post(TV_URL, json=payload, timeout=15)
-        r.raise_for_status()
-        return r.json().get("data", [])
-    except Exception as e:
-        st.error(f"Data fetch error: {e}")
-        return []
+    # Try with symbol filter first, then without (fetch all Pakistan and filter locally)
+    payloads = [
+        {**base_payload, "filter": [{"left": "name", "operation": "in_range", "right": KSE100}]},
+        base_payload,
+    ]
+    kse_set = set(KSE100)
+    for payload in payloads:
+        try:
+            r = _session().post(TV_URL, json=payload, timeout=15)
+            r.raise_for_status()
+            data = r.json().get("data", [])
+            if data:
+                # Filter to KSE100 universe when fetching all
+                if "filter" not in payload:
+                    data = [item for item in data if item.get("d", [None])[0] in kse_set]
+                return data
+        except Exception as e:
+            st.error(f"Data fetch error: {e}")
+    return []
 
 def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
     """Calculates breadth from existing live data."""
@@ -510,7 +534,7 @@ def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
             if chg > 0: adv += 1
             elif chg < 0: dec += 1
 
-    avg = sum(chgs) / len(chgs) if chgs else 0.0
+    avg = float(np.median(chgs)) if chgs else 0.0
     avg_price = sum(prices) / len(prices) if prices else 0.0
     max_high = max(highs) if highs else 0.0
     min_low = min(lows) if lows else 0.0
@@ -527,10 +551,25 @@ def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_kse_index() -> Optional[dict]:
+    """Fetch KSE-100 index data from Sarmaaya API."""
     try:
-        r = requests.get("https://beta-restapi.sarmaaya.pk/api/indices/overview/KSE100", timeout=8)
+        r = requests.get(
+            "https://beta-restapi.sarmaaya.pk/api/indices/overview/KSE100",
+            timeout=8,
+            headers={"User-Agent": "Mozilla/5.0"}
+        )
         if r.status_code == 200:
-            return r.json().get("response", {})
+            data = r.json()
+            # Handle both wrapped and unwrapped response shapes
+            result = data.get("response") or data.get("data") or data
+            if isinstance(result, dict) and ("close" in result or "currentValue" in result):
+                # Normalize keys — Sarmaaya uses different key names across versions
+                normalized = {
+                    "close":         result.get("close") or result.get("currentValue") or result.get("value", 0),
+                    "changePercent": result.get("changePercent") or result.get("percentageChange") or result.get("change", 0),
+                    "volume":        result.get("volume") or result.get("totalVolume", 0),
+                }
+                return normalized
     except Exception:
         pass
     return None
@@ -1540,7 +1579,8 @@ avg_chg, bullish, adv, dec, kse_fb = calculate_breadth_from_raw(raw_data)
 kse_api = fetch_kse_index()
 
 def _kse(key, fb):
-    return kse_api.get(key, fb) if kse_api else fb
+    val = kse_api.get(key) if kse_api else None
+    return val if val is not None else fb
 
 idx_close = _kse("close",         kse_fb["close"])
 idx_pct   = _kse("changePercent", kse_fb["change"])
@@ -1613,6 +1653,13 @@ if not bullish:
     st.markdown(f'<div class="paper-alert"><strong>BEARISH BREADTH</strong> — Market declining ({adv} advancers vs {dec} decliners). Reduce position sizes. Intraday setups require extra confirmation.</div>', unsafe_allow_html=True)
 
 scan = is_open or scan_btn
+
+# Initialize signal dataframes (populated inside scan block below)
+df_i = pd.DataFrame()
+df_s = pd.DataFrame()
+df_l = pd.DataFrame()
+df_d = pd.DataFrame()
+all_stocks_df = pd.DataFrame()
 
 if scan:
     with st.spinner("Scanning KSE-100..."):
