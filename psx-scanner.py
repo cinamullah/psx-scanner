@@ -1,20 +1,6 @@
 """
 PSX Market Intelligence Report — Wall Street Edition
 KSE-100 · 9-Layer Signal Engine · Institutional-Grade Scanner
-─────────────────────────────────────────────────────────────
-Upgrades over base version:
-  • 200-day historical window (vs 90d)
-  • Volume Profile (POC / Value Area High/Low)
-  • Institutional Flow Score (On-Balance Volume, Chaikin Money Flow)
-  • Multi-timeframe EMA confluence (5/10/20/50/200)
-  • Mean Reversion Z-Score overlay
-  • O'Neil-style RS Rank (relative strength vs universe)
-  • 52-week High/Low percentile positioning
-  • Sector Rotation heatmap with momentum scores
-  • Earnings-Quality proxy (EPS stability from price stability)
-  • Market Regime filter (bull/bear via KSE200-MA)
-  • Enhanced dip-quality scoring with divergence detection
-  • 9 scoring layers (was 7); layer budgets rebalanced to 100
 """
 
 import streamlit as st
@@ -179,6 +165,11 @@ def init_db():
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
             """)
+        # ── Schema migration: add rs_rank to existing DBs that predate this column ──
+        cols = [r[1] for r in conn.execute("PRAGMA table_info(daily_snapshot)").fetchall()]
+        if "rs_rank" not in cols:
+            conn.execute("ALTER TABLE daily_snapshot ADD COLUMN rs_rank REAL DEFAULT 50")
+            conn.commit()
     finally:
         conn.close()
 
