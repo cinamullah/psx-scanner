@@ -174,13 +174,13 @@ def init_db():
         conn.close()
 
 def sync_historical_data(symbols: List[str]):
-    """Batch download 260 days of OHLCV from Yahoo Finance."""
+    """Batch download 120 days of OHLCV from Yahoo Finance."""
     end   = datetime.now()
     start = end - timedelta(days=CFG["HIST_DAYS"] + 30)   # buffer for holidays
     tickers = [f"{s}.KA" for s in symbols]
 
     ph = st.empty()
-    ph.caption("Fetching 260-day market history…")
+    ph.caption("Fetching 120-day market history…")
 
     try:
         df = yf.download(tickers, start=start, end=end, group_by='ticker',
@@ -1781,7 +1781,7 @@ with head_cols[1]:
     scan_btn = st.button("SCAN", help="Run scanner now", use_container_width=True)
 with head_cols[2]:
     st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
-    sync_btn = st.button("SYNC", help="Sync 260-day history", use_container_width=True)
+    sync_btn = st.button("SYNC", help="Sync 120-day history", use_container_width=True)
 
 st.markdown('<div style="border-bottom:3px double #2a3040;margin-bottom:18px;margin-top:8px"></div>', unsafe_allow_html=True)
 
