@@ -1,6 +1,20 @@
 """
-PSX Market Intelligence Report
-KSE-100 · 7-Layer Signal Engine · Institutional-Grade Scanner
+PSX Market Intelligence Report — Wall Street Edition
+KSE-100 · 9-Layer Signal Engine · Institutional-Grade Scanner
+─────────────────────────────────────────────────────────────
+Upgrades over base version:
+  • 200-day historical window (vs 90d)
+  • Volume Profile (POC / Value Area High/Low)
+  • Institutional Flow Score (On-Balance Volume, Chaikin Money Flow)
+  • Multi-timeframe EMA confluence (5/10/20/50/200)
+  • Mean Reversion Z-Score overlay
+  • O'Neil-style RS Rank (relative strength vs universe)
+  • 52-week High/Low percentile positioning
+  • Sector Rotation heatmap with momentum scores
+  • Earnings-Quality proxy (EPS stability from price stability)
+  • Market Regime filter (bull/bear via KSE200-MA)
+  • Enhanced dip-quality scoring with divergence detection
+  • 9 scoring layers (was 7); layer budgets rebalanced to 100
 """
 
 import streamlit as st
@@ -20,10 +34,7 @@ from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 from typing import Dict, List, Optional, Tuple
 
-st.set_page_config(
-    page_title="PSX Market Intelligence",
-    layout="wide"
-)
+st.set_page_config(page_title="PSX Market Intelligence", layout="wide")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # CONFIGURATION
@@ -37,31 +48,31 @@ CFG = {
     "REFRESH_SEC":   180,
     "MIN_VOLUME":    100_000,
     "MIN_PRICE":     2.0,
-    "INST_VOL_X":   2.5,
+    "INST_VOL_X":    2.5,
     "BREADTH_MIN":   0.0,
     "DB_PATH":       os.path.join(BASE_DIR, "psx_elite.db"),
-    "HIST_DAYS":     90,
+    "HIST_DAYS":     260,          # ↑ was 90 — covers full trading year
+    "REGIME_PERIOD": 200,          # MA period for market regime detection
 }
 
-# ── Layer Budgets (total = 100) ───────────────────────────────────────────────
-# Each layer has a maximum contribution to the final score.
+# ── 9-Layer Budgets (total = 100) ─────────────────────────────────────────────
 LAYER_BUDGET = {
-    "trend":      20,   # Layer 1: Trend Structure
-    "momentum":   20,   # Layer 2: Momentum Cascade
-    "volume":     15,   # Layer 3: Volume Footprint
-    "pattern":    15,   # Layer 4: Price Pattern
-    "breadth":    10,   # Layer 5: Breadth / Context
-    "volatility": 10,   # Layer 6: Volatility State
-    "historical": 10,   # Layer 7: Historical Quality
+    "trend":        18,   # Layer 1: Multi-TF Trend Structure
+    "momentum":     17,   # Layer 2: Momentum Cascade + RS Rank
+    "volume":       13,   # Layer 3: Volume Footprint + Institutional Flow
+    "pattern":      12,   # Layer 4: Price Pattern + Mean Reversion
+    "breadth":       8,   # Layer 5: Market Breadth / Context
+    "volatility":    8,   # Layer 6: Volatility State
+    "historical":   10,   # Layer 7: Historical Quality (200d)
+    "flow":         10,   # Layer 8: Institutional Flow (OBV + CMF) ← NEW
+    "regime":        4,   # Layer 9: Market Regime ← NEW
 }
 
-# ── Thresholds on 0-100 scale ─────────────────────────────────────────────────
 THRESH_INTRA = 55
 THRESH_SWING = 50
 THRESH_LONG  = 45
 
 # ── Universe ──────────────────────────────────────────────────────────────────
-
 KSE100 = [
     "CNERGY","BOP","PRL","WTL","KOSM","KEL","UNITY","NCPL","CSIL","PAEL",
     "SSGC","TRG","ATRL","MLCF","SYS","NPL","CLOV","YOUW","TELE","PTC",
@@ -75,53 +86,26 @@ SECTORS: Dict[str, Dict] = {
     "Banks":     {"symbols": ["MEBL","UBL","ABL","BAFL","BAHL","BOP","NBP","HBL","MCB","FABL","JSBL","SILK"], "quality": 9},
     "E&P":       {"symbols": ["OGDC","PPL","MARI","POL"],                                                      "quality": 9},
     "Fertilizer":{"symbols": ["FFC","ENGROH","EFERT"],                                                         "quality": 9},
-    "Cement":    {"symbols": ["LUCK","DGKC","MLCF","CHCC","FCCL","ACPL","PIOC"],                              "quality": 7},
-    "Tech":      {"symbols": ["SYS","TRG","PTC","NETSOL","AIRLINK"],                                          "quality": 7},
-    "Power":     {"symbols": ["HUBC","KEL","NCPL","PAEL","NPL","KAPCO","POWER"],                              "quality": 7},
-    "Oil & Gas": {"symbols": ["SNGP","SSGC","PSO","NRL","ATRL","PRL","CNERGY"],                               "quality": 8},
+    "Cement":    {"symbols": ["LUCK","DGKC","MLCF","CHCC","FCCL","ACPL","PIOC"],                               "quality": 7},
+    "Tech":      {"symbols": ["SYS","TRG","PTC","NETSOL","AIRLINK"],                                           "quality": 7},
+    "Power":     {"symbols": ["HUBC","KEL","NCPL","PAEL","NPL","KAPCO","POWER"],                               "quality": 7},
+    "Oil & Gas": {"symbols": ["SNGP","SSGC","PSO","NRL","ATRL","PRL","CNERGY"],                                "quality": 8},
     "Auto":      {"symbols": ["ATLH","HCAR","MTL"],                                                            "quality": 6},
-    "Food":      {"symbols": ["UNITY","COLG"],                                                                 "quality": 8},
-    "Pharma":    {"symbols": ["ABOT"],                                                                         "quality": 9},
+    "Food":      {"symbols": ["UNITY","COLG"],                                                                  "quality": 8},
+    "Pharma":    {"symbols": ["ABOT"],                                                                          "quality": 9},
     "Textile":   {"symbols": ["KOSM","CLOV","ILP"],                                                            "quality": 5},
-    "Misc":      {"symbols": ["YOUW","CSIL","PIBTL","TGL","TELE"],                                            "quality": 5},
+    "Misc":      {"symbols": ["YOUW","CSIL","PIBTL","TGL","TELE"],                                             "quality": 5},
 }
-
 SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
 
-# ── TradingView columns ──────────────────────────────────────────────────────
 TV_COLS = [
-    "name",                      # 0
-    "close",                     # 1
-    "change",                    # 2
-    "volume",                    # 3
-    "relative_volume_10d_calc",  # 4
-    "average_volume_10d_calc",   # 5
-    "RSI",                       # 6
-    "MACD.macd",                 # 7
-    "MACD.signal",               # 8
-    "BB.lower",                  # 9
-    "BB.upper",                  # 10
-    "EMA20",                     # 11
-    "EMA50",                     # 12
-    "change|1W",                 # 13
-    "High.1M",                   # 14
-    "Low.1M",                    # 15
-    "VWAP",                      # 16
-    "EMA10",                     # 17
-    "ADX",                       # 18
-    "ATR",                       # 19
-    "Stoch.K",                   # 20
-    "Stoch.D",                   # 21
-    "open",                      # 22
-    "high",                      # 23
-    "low",                       # 24
-    "EMA5",                      # 25
-    "change|1M",                 # 26
-    "RSI[1]",                    # 27
-    "low|7D",                    # 28
-    "MACD.hist",                 # 29
-    "Pivot.M.Classic.Middle",    # 30
-    "BB.basis",                  # 31
+    "name","close","change","volume","relative_volume_10d_calc",
+    "average_volume_10d_calc","RSI","MACD.macd","MACD.signal",
+    "BB.lower","BB.upper","EMA20","EMA50","change|1W","High.1M","Low.1M",
+    "VWAP","EMA10","ADX","ATR","Stoch.K","Stoch.D","open","high","low",
+    "EMA5","change|1M","RSI[1]","low|7D","MACD.hist",
+    "Pivot.M.Classic.Middle","BB.basis",
+    "High.3M","Low.3M","High.6M","Low.6M",   # ← NEW: wider range context
 ]
 
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
@@ -141,9 +125,7 @@ def is_market_open() -> bool:
     return CFG["MARKET_OPEN"] <= t <= CFG["MARKET_CLOSE"]
 
 def safe(val, default=0.0):
-    """Safe value extraction — returns default for None/NaN."""
-    if val is None:
-        return default
+    if val is None: return default
     try:
         f = float(val)
         return default if math.isnan(f) or math.isinf(f) else f
@@ -152,27 +134,22 @@ def safe(val, default=0.0):
 
 def _rr(price: float, target: float, stop: float) -> float:
     denom = price - stop
-    if denom <= 0 or target <= price:
-        return 0.0
+    if denom <= 0 or target <= price: return 0.0
     return round((target - price) / denom, 2)
 
 def _clamp(value: float, low: float, high: float) -> float:
-    """Clamp a value within bounds."""
     return max(low, min(high, value))
 
 def _grade(score: int, layers_active: int) -> str:
-    """Assign a letter grade based on score and layer confluence."""
-    if score >= 75 and layers_active >= 6:
-        return "A"
-    elif score >= 60 and layers_active >= 5:
-        return "B"
-    elif score >= 45 and layers_active >= 4:
-        return "C"
-    else:
-        return "D"
+    if score >= 78 and layers_active >= 7: return "A+"
+    if score >= 72 and layers_active >= 6: return "A"
+    if score >= 62 and layers_active >= 5: return "B+"
+    if score >= 55 and layers_active >= 5: return "B"
+    if score >= 45 and layers_active >= 4: return "C"
+    return "D"
 
 # ══════════════════════════════════════════════════════════════════════════════
-# DATABASE — historical OHLCV store
+# DATABASE
 # ══════════════════════════════════════════════════════════════════════════════
 
 def init_db():
@@ -197,6 +174,7 @@ def init_db():
                     symbol TEXT,
                     trend  TEXT,
                     rv     REAL,
+                    rs_rank REAL DEFAULT 50,
                     PRIMARY KEY (date, symbol)
                 );
                 CREATE INDEX IF NOT EXISTS idx_snapshot_date ON daily_snapshot(date DESC);
@@ -205,58 +183,58 @@ def init_db():
         conn.close()
 
 def sync_historical_data(symbols: List[str]):
-    """Optimized batch download from Yahoo Finance."""
-    end = datetime.now()
-    start = end - timedelta(days=CFG["HIST_DAYS"])
+    """Batch download 260 days of OHLCV from Yahoo Finance."""
+    end   = datetime.now()
+    start = end - timedelta(days=CFG["HIST_DAYS"] + 30)   # buffer for holidays
+    tickers = [f"{s}.KA" for s in symbols]
 
     ph = st.empty()
-    ph.caption("Fetching market history...")
+    ph.caption("Fetching 260-day market history…")
+
+    try:
+        df = yf.download(tickers, start=start, end=end, group_by='ticker',
+                         progress=False, auto_adjust=True)
+    except Exception as e:
+        ph.error(f"Yahoo download failed: {e}")
+        return
 
     conn = sqlite3.connect(CFG["DB_PATH"])
+    saved = 0
     try:
-        # Download in batches to handle both single and multi-ticker responses
         for sym in symbols:
             try:
-                ticker_str = f"{sym}.KA"
-                raw = yf.download(ticker_str, start=start, end=end, progress=False, auto_adjust=True)
-                if raw is None or raw.empty:
+                key = f"{sym}.KA"
+                if key not in df.columns.get_level_values(0):
                     continue
-
-                # Flatten MultiIndex columns if present (yfinance >=0.2 with multiple tickers)
-                if isinstance(raw.columns, pd.MultiIndex):
-                    raw.columns = raw.columns.get_level_values(0)
-
-                raw = raw.dropna(subset=["Open", "High", "Low", "Close", "Volume"]).reset_index()
-
+                ticker_df = df[key].dropna().reset_index()
+                if ticker_df.empty: continue
                 rows = []
-                for _, r in raw.iterrows():
-                    date_val = r["Date"]
-                    if hasattr(date_val, "strftime"):
-                        date_str = date_val.strftime("%Y-%m-%d")
-                    else:
-                        date_str = str(date_val)[:10]
-                    rows.append((
-                        date_str, sym,
-                        float(r["Open"]), float(r["High"]),
-                        float(r["Low"]), float(r["Close"]), int(r["Volume"])
-                    ))
-                if rows:
-                    with conn:
-                        conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+                for _, r in ticker_df.iterrows():
+                    try:
+                        rows.append((
+                            r["Date"].strftime("%Y-%m-%d"), sym,
+                            float(r["Open"]), float(r["High"]),
+                            float(r["Low"]), float(r["Close"]), int(r["Volume"])
+                        ))
+                    except Exception:
+                        continue
+                with conn:
+                    conn.executemany(
+                        "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
+                    )
+                saved += 1
             except Exception:
                 continue
     finally:
         conn.close()
-        ph.empty()
+        ph.caption(f"Synced {saved}/{len(symbols)} symbols — {CFG['HIST_DAYS']}-day history loaded.")
 
 def save_snapshot(raw: list):
-    """Persist today's live prices."""
-    if not raw:
-        return
+    if not raw: return
     today = pkt_now().strftime("%Y-%m-%d")
     conn  = sqlite3.connect(CFG["DB_PATH"])
     try:
-        rows  = []
+        rows = []
         for item in raw:
             d = item.get("d", [])
             if len(d) >= 25 and d[0]:
@@ -267,74 +245,186 @@ def save_snapshot(raw: list):
                 ))
         if rows:
             with conn:
-                conn.executemany("INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows)
+                conn.executemany(
+                    "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
+                )
     finally:
         conn.close()
 
 def get_yesterday_snapshot() -> Dict[str, Dict]:
-    """Fetches the last available daily snapshot from the database."""
     conn = sqlite3.connect(CFG["DB_PATH"])
     try:
         today = pkt_now().strftime("%Y-%m-%d")
-
-        # Find the most recent date in the snapshot table that is not today
-        last_date_query = "SELECT MAX(date) FROM daily_snapshot WHERE date < ?"
         cursor = conn.cursor()
-        cursor.execute(last_date_query, (today,))
+        cursor.execute(
+            "SELECT MAX(date) FROM daily_snapshot WHERE date < ?", (today,)
+        )
         last_date = cursor.fetchone()[0]
-
         snapshot = {}
         if last_date:
             df = pd.read_sql(
-                "SELECT symbol, trend, rv FROM daily_snapshot WHERE date = ?",
+                "SELECT symbol, trend, rv, rs_rank FROM daily_snapshot WHERE date = ?",
                 conn, params=(last_date,)
             )
             for _, row in df.iterrows():
                 snapshot[row['symbol']] = {
                     'trend': row['trend'],
-                    'rv': row['rv']
+                    'rv': row['rv'],
+                    'rs_rank': row.get('rs_rank', 50),
                 }
         return snapshot
     finally:
         conn.close()
 
 def save_daily_snapshot(df: pd.DataFrame):
-    """Saves the current day's trend and RV data to the snapshot table."""
-    if df.empty:
-        return
+    if df.empty: return
     today = pkt_now().strftime("%Y-%m-%d")
     conn = sqlite3.connect(CFG["DB_PATH"])
     try:
         rows = []
         for _, row in df.iterrows():
-            rows.append((today, row['Symbol'], row['Bias'], row.get('RV', 0.0)))
+            rows.append((
+                today, row['Symbol'], row['Bias'],
+                row.get('RV', 0.0), row.get('RS', 50.0)
+            ))
         with conn:
-            conn.executemany("INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?)", rows)
+            conn.executemany(
+                "INSERT OR REPLACE INTO daily_snapshot VALUES (?,?,?,?,?)", rows
+            )
     finally:
         conn.close()
 
 # ══════════════════════════════════════════════════════════════════════════════
-# HISTORICAL ANALYTICS ENGINE
+# HISTORICAL ANALYTICS ENGINE  — Wall Street Edition
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _calc_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
+    """On-Balance Volume."""
+    delta = close.diff()
+    direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
+    return (direction * volume).cumsum()
+
+def _calc_cmf(high, low, close, volume, period=20) -> float:
+    """Chaikin Money Flow — institutional buying/selling pressure."""
+    clv = ((close - low) - (high - close)) / (high - low + 1e-9)
+    cmf = (clv * volume).rolling(period).sum() / (volume.rolling(period).sum() + 1e-9)
+    return float(cmf.iloc[-1]) if not cmf.empty else 0.0
+
+def _calc_vwap_bands(high, low, close, volume) -> Tuple[float, float, float]:
+    """Rolling VWAP with ±1σ bands over last 20 sessions."""
+    tp = (high + low + close) / 3
+    n = min(20, len(tp))
+    w_sum = (tp * volume).tail(n).sum()
+    v_sum = volume.tail(n).sum()
+    vwap = w_sum / v_sum if v_sum > 0 else float(close.iloc[-1])
+    std = float(((tp.tail(n) - vwap) ** 2).mean() ** 0.5)
+    return vwap, vwap + std, vwap - std
+
+def _volume_profile_poc(close: pd.Series, volume: pd.Series, bins=20) -> Tuple[float, float, float]:
+    """
+    Volume Profile: Point of Control (price with most volume),
+    Value Area High, Value Area Low (covers 70% of total volume).
+    """
+    if len(close) < 10:
+        return float(close.iloc[-1]), float(close.max()), float(close.min())
+    c_min, c_max = close.min(), close.max()
+    if c_max == c_min:
+        return float(c_min), float(c_max), float(c_min)
+    edges = np.linspace(c_min, c_max, bins + 1)
+    centers = (edges[:-1] + edges[1:]) / 2
+    vol_profile = np.zeros(bins)
+    for price, vol in zip(close, volume):
+        idx = int((price - c_min) / (c_max - c_min + 1e-9) * (bins - 1))
+        idx = max(0, min(bins - 1, idx))
+        vol_profile[idx] += vol
+    poc_idx = int(np.argmax(vol_profile))
+    poc = float(centers[poc_idx])
+    # Value Area: add bins from POC outward until 70% covered
+    total = vol_profile.sum()
+    target = total * 0.70
+    covered = vol_profile[poc_idx]
+    lo_idx, hi_idx = poc_idx, poc_idx
+    while covered < target and (lo_idx > 0 or hi_idx < bins - 1):
+        lo_add = vol_profile[lo_idx - 1] if lo_idx > 0 else 0
+        hi_add = vol_profile[hi_idx + 1] if hi_idx < bins - 1 else 0
+        if lo_add >= hi_add and lo_idx > 0:
+            lo_idx -= 1; covered += lo_add
+        elif hi_idx < bins - 1:
+            hi_idx += 1; covered += hi_add
+        else:
+            lo_idx -= 1; covered += lo_add
+    return poc, float(centers[hi_idx]), float(centers[lo_idx])
+
+def _calc_rs_rank(sym_return: float, all_returns: List[float]) -> float:
+    """O'Neil-style RS Rank: 1-99 percentile of 3-month return vs universe."""
+    if not all_returns: return 50.0
+    pct = sum(1 for r in all_returns if r <= sym_return) / len(all_returns)
+    return round(pct * 99 + 1, 1)
+
+def _detect_divergence(rsi_series: pd.Series, close: pd.Series) -> Tuple[bool, bool]:
+    """
+    Bullish divergence: price making lower lows, RSI making higher lows.
+    Bearish divergence: price making higher highs, RSI making lower highs.
+    """
+    if len(rsi_series) < 10 or len(close) < 10:
+        return False, False
+    # Use last 10 bars
+    p = close.tail(10).values
+    r = rsi_series.tail(10).values
+    bull_div = (p[-1] < p[0]) and (r[-1] > r[0])   # price down, RSI up
+    bear_div = (p[-1] > p[0]) and (r[-1] < r[0])   # price up, RSI down
+    return bull_div, bear_div
+
+def _mean_reversion_zscore(close: pd.Series, window=20) -> float:
+    """Z-score of current price vs rolling mean — how stretched/compressed."""
+    if len(close) < window: return 0.0
+    mu  = close.tail(window).mean()
+    sig = close.tail(window).std()
+    if sig == 0: return 0.0
+    return float((close.iloc[-1] - mu) / sig)
+
+def _calc_regime(close: pd.Series, period: int) -> str:
+    """
+    Market regime from 200-day MA slope:
+      BULL: price > MA200 and MA200 rising
+      BEAR: price < MA200 and MA200 falling
+      NEUTRAL: mixed
+    """
+    if len(close) < period:
+        return "NEUTRAL"
+    ma = close.rolling(period).mean()
+    if ma.iloc[-1] != ma.iloc[-1]: return "NEUTRAL"   # NaN check
+    slope = (ma.iloc[-1] - ma.iloc[-10]) / ma.iloc[-10] * 100 if len(ma.dropna()) > 10 else 0
+    above = float(close.iloc[-1]) > float(ma.iloc[-1])
+    if above and slope > 0.1:  return "BULL"
+    if not above and slope < -0.1: return "BEAR"
+    return "NEUTRAL"
+
 def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
-    """Vectorized historical analytics."""
     df = pd.read_sql(
-        "SELECT open, high, low, close, volume FROM price_history WHERE symbol=? ORDER BY date ASC",
+        "SELECT open, high, low, close, volume FROM price_history "
+        "WHERE symbol=? ORDER BY date ASC",
         db_conn, params=(symbol,)
     )
 
     empty = {
         "has_data": False, "n": 0,
         "stability": 0.0, "avg_vol": 0.0, "vol_trend": 0.0,
-        "trend_pct_30": 0.0, "trend_pct_10": 0.0,
+        "trend_pct_30": 0.0, "trend_pct_10": 0.0, "trend_pct_60": 0.0,
         "volatility": 0.0, "atr_20": 0.0,
         "momentum": 0.0, "rsi_hist": 50.0, "rsi_slope": 0.0,
-        "ema10_slope": 0.0, "ema20_slope": 0.0,
+        "ema10_slope": 0.0, "ema20_slope": 0.0, "ema50_slope": 0.0,
         "support_level": 0.0, "resistance_level": 0.0,
         "consec_up": 0, "consec_down": 0,
         "higher_lows": False, "vol_accumulation": False,
         "squeeze": False, "triple_bottom": False,
+        # New fields
+        "obv_slope": 0.0, "cmf": 0.0,
+        "poc": 0.0, "vah": 0.0, "val": 0.0,
+        "bull_divergence": False, "bear_divergence": False,
+        "zscore": 0.0, "regime": "NEUTRAL",
+        "w52_pct": 50.0, "ema200": 0.0,
+        "return_3m": 0.0,
     }
 
     if len(df) < 20:
@@ -345,55 +435,59 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     h = df['high']
     l = df['low']
     v = df['volume']
+    o = df['open']
 
     # ── 1. Trend metrics ──────────────────────────────────────────────────────
     trend_pct_30 = (c.iloc[-1] / c.iloc[max(0, n-30)] - 1) * 100 if n >= 30 else 0.0
     trend_pct_10 = (c.iloc[-1] / c.iloc[max(0, n-10)] - 1) * 100 if n >= 10 else 0.0
+    trend_pct_60 = (c.iloc[-1] / c.iloc[max(0, n-60)] - 1) * 100 if n >= 60 else 0.0
+    return_3m    = (c.iloc[-1] / c.iloc[max(0, n-63)] - 1) * 100 if n >= 63 else 0.0
 
-    # ── 2. Stability (% of up-days, last 15 sessions) ─────────────────────────
-    up_days = (c.diff() >= 0).tail(15).sum()
-    stability = (up_days / 15) * 10 if n >= 15 else 0.0
+    # ── 2. Stability ──────────────────────────────────────────────────────────
+    up_days = (c.diff() >= 0).tail(20).sum()
+    stability = (up_days / 20) * 10 if n >= 20 else 0.0
 
     # ── 3. Volume analytics ───────────────────────────────────────────────────
     avg_vol = v.tail(30).mean() if n >= 30 else v.mean()
     recent_vol = v.tail(5).mean() if n >= 5 else avg_vol
-    older_vol = v.iloc[-20:-5].mean() if n >= 20 else avg_vol
-    vol_trend = (recent_vol / older_vol - 1) * 100 if older_vol > 0 else 0.0
+    older_vol  = v.iloc[-20:-5].mean() if n >= 20 else avg_vol
+    vol_trend  = (recent_vol / older_vol - 1) * 100 if older_vol > 0 else 0.0
 
-    # ── 4. True-Range ATR (20-period) ─────────────────────────────────────────
+    # ── 4. ATR (20) ───────────────────────────────────────────────────────────
     tr = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
-    atr_20 = tr.rolling(20).mean().iloc[-1] if len(tr) >= 20 else 0.0
+    atr_20 = float(tr.rolling(20).mean().iloc[-1]) if len(tr) >= 20 else 0.0
 
-    # ── 5. Historical volatility (annualised %) ──────────────────────────────
+    # ── 5. Historical volatility ──────────────────────────────────────────────
     returns = c.pct_change().dropna()
-    volatility = returns.tail(20).std() * math.sqrt(252) * 100 if len(returns) >= 20 else 0.0
+    volatility = float(returns.tail(20).std()) * math.sqrt(252) * 100 if len(returns) >= 20 else 0.0
 
-    # ── 6. Momentum (EMA5 vs EMA20) ──────────────────────────────────────────
-    ema5 = c.ewm(span=5, adjust=False).mean()
-    ema10 = c.ewm(span=10, adjust=False).mean()
-    ema20 = c.ewm(span=20, adjust=False).mean()
+    # ── 6. EMAs & slopes ─────────────────────────────────────────────────────
+    ema5  = c.ewm(span=5,   adjust=False).mean()
+    ema10 = c.ewm(span=10,  adjust=False).mean()
+    ema20 = c.ewm(span=20,  adjust=False).mean()
+    ema50 = c.ewm(span=50,  adjust=False).mean()
+    ema200 = c.ewm(span=200, adjust=False).mean() if n >= 50 else ema50
+    momentum    = (float(ema5.iloc[-1]) / float(ema20.iloc[-1]) - 1) * 100 if len(ema5) >= 2 else 0.0
+    ema10_slope = (float(ema10.iloc[-1]) / float(ema10.iloc[max(0, len(ema10)-5)]) - 1) * 100 if len(ema10) >= 5 else 0.0
+    ema20_slope = (float(ema20.iloc[-1]) / float(ema20.iloc[max(0, len(ema20)-5)]) - 1) * 100 if len(ema20) >= 5 else 0.0
+    ema50_slope = (float(ema50.iloc[-1]) / float(ema50.iloc[max(0, len(ema50)-10)]) - 1) * 100 if len(ema50) >= 10 else 0.0
 
-    momentum = (ema5.iloc[-1] / ema20.iloc[-1] - 1) * 100 if len(ema5) >= 2 and len(ema20) >= 2 else 0.0
-    ema10_slope = (ema10.iloc[-1] / ema10.iloc[max(0, len(ema10)-5)] - 1) * 100 if len(ema10) >= 5 else 0.0
-    ema20_slope = (ema20.iloc[-1] / ema20.iloc[max(0, len(ema20)-5)] - 1) * 100 if len(ema20) >= 5 else 0.0
-
-    # ── 7. Historical RSI (14-period) & slope ────────────────────────────────
-    delta = c.diff()
-    gain = delta.where(delta > 0, 0)
-    loss = -delta.where(delta < 0, 0)
+    # ── 7. Historical RSI (14) & slope ───────────────────────────────────────
+    delta    = c.diff()
+    gain     = delta.where(delta > 0, 0)
+    loss     = -delta.where(delta < 0, 0)
     avg_gain = gain.ewm(com=13, adjust=False).mean()
     avg_loss = loss.ewm(com=13, adjust=False).mean()
-    rs = avg_gain / avg_loss
+    rs = avg_gain / (avg_loss + 1e-9)
     rsi_series = 100 - (100 / (1 + rs))
+    rsi_hist = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
+    rsi_slope = float(rsi_series.iloc[-1] - rsi_series.iloc[max(0, len(rsi_series)-4)]) if len(rsi_series) >= 4 else 0.0
 
-    rsi_hist = rsi_series.iloc[-1] if not pd.isna(rsi_series.iloc[-1]) else 50.0
-    rsi_slope = (rsi_series.iloc[-1] - rsi_series.iloc[max(0, len(rsi_series)-4)]) if len(rsi_series) >= 4 else 0.0
+    # ── 8. Support / Resistance ──────────────────────────────────────────────
+    support_level    = float(l.tail(20).min()) if n >= 20 else 0.0
+    resistance_level = float(h.tail(20).max()) if n >= 20 else 0.0
 
-    # ── 8. Support / resistance (last 15 bars) ──────────────────────────────
-    support_level = l.tail(15).min() if n >= 15 else 0.0
-    resistance_level = h.tail(15).max() if n >= 15 else 0.0
-
-    # ── 9. Consecutive direction streak ──────────────────────────────────────
+    # ── 9. Consecutive streak ────────────────────────────────────────────────
     consec_up = consec_down = 0
     if n > 1:
         diffs = c.diff().dropna()
@@ -407,63 +501,101 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
             else:
                 break
 
-    # ── 10. Higher-lows pattern ──────────────────────────────────────────────
-    higher_lows = False
-    if n >= 3:
-        if l.iloc[-1] > l.iloc[-2] and l.iloc[-2] > l.iloc[-3]:
-            higher_lows = True
+    # ── 10. Higher-lows ──────────────────────────────────────────────────────
+    higher_lows = n >= 3 and l.iloc[-1] > l.iloc[-2] > l.iloc[-3]
 
-    # ── 10b. Triple-bottom pattern ───────────────────────────────────────────
+    # ── 11. Triple bottom ────────────────────────────────────────────────────
     triple_bottom = False
     if n >= 5:
-        recent_lows = l.tail(5)
-        if len(recent_lows) >= 3:
-            min_low = recent_lows.min()
-            max_low = recent_lows.max()
-            if (max_low - min_low) / min_low < 0.02:
-                triple_bottom = True
+        rl = l.tail(5)
+        if (rl.max() - rl.min()) / (rl.min() + 1e-9) < 0.02:
+            triple_bottom = True
 
-    # ── 11. Volume accumulation ──────────────────────────────────────────────
+    # ── 12. Volume accumulation ──────────────────────────────────────────────
     vol_accumulation = False
     if n >= 10:
-        up_days_mask = c.diff() > 0
-        down_days_mask = c.diff() < 0
-        up_vol = v[up_days_mask].tail(10).sum()
-        down_vol = v[down_days_mask].tail(10).sum()
+        up_mask   = c.diff() > 0
+        down_mask = c.diff() < 0
+        up_vol    = v[up_mask].tail(10).sum()
+        down_vol  = v[down_mask].tail(10).sum()
         if down_vol > 0:
             vol_accumulation = up_vol > down_vol * 1.3
 
-    # ── 12. Bollinger Band squeeze ───────────────────────────────────────────
+    # ── 13. BB Squeeze ───────────────────────────────────────────────────────
     squeeze = False
     if n >= 20:
-        bb_std = c.rolling(window=20).std()
-        bb_mean = c.rolling(window=20).mean()
-        bb_width = ((2 * bb_std) / bb_mean) * 100
-        if bb_width.iloc[-1] < 4.0:
-            squeeze = True
+        bb_std  = c.rolling(20).std()
+        bb_mean = c.rolling(20).mean()
+        bb_width = ((2 * bb_std) / (bb_mean + 1e-9)) * 100
+        squeeze = float(bb_width.iloc[-1]) < 4.0
+
+    # ── NEW 14. OBV slope ────────────────────────────────────────────────────
+    obv = _calc_obv(c, v)
+    obv_slope = 0.0
+    if len(obv) >= 10:
+        obv_vals = obv.tail(10).values
+        xs = np.arange(len(obv_vals), dtype=float)
+        if obv_vals.std() > 0:
+            obv_slope = float(np.polyfit(xs, obv_vals / (obv_vals.std() + 1e-9), 1)[0])
+
+    # ── NEW 15. Chaikin Money Flow ────────────────────────────────────────────
+    cmf = _calc_cmf(h, l, c, v) if n >= 20 else 0.0
+
+    # ── NEW 16. Volume Profile ────────────────────────────────────────────────
+    poc, vah, val_vp = _volume_profile_poc(c.tail(60), v.tail(60)) if n >= 20 else (float(c.iloc[-1]), float(c.max()), float(c.min()))
+
+    # ── NEW 17. RSI Divergence ────────────────────────────────────────────────
+    bull_div, bear_div = _detect_divergence(rsi_series, c)
+
+    # ── NEW 18. Mean Reversion Z-Score ───────────────────────────────────────
+    zscore = _mean_reversion_zscore(c)
+
+    # ── NEW 19. Market Regime ────────────────────────────────────────────────
+    regime = _calc_regime(c, CFG["REGIME_PERIOD"])
+
+    # ── NEW 20. 52-week percentile ───────────────────────────────────────────
+    w52_period = min(n, 252)
+    c_52 = c.tail(w52_period)
+    w52_lo, w52_hi = float(c_52.min()), float(c_52.max())
+    w52_pct = (float(c.iloc[-1]) - w52_lo) / (w52_hi - w52_lo + 1e-9) * 100 if w52_hi > w52_lo else 50.0
 
     return {
         "has_data": True, "n": n,
-        "stability":   round(stability, 2),
-        "avg_vol":     avg_vol,
-        "vol_trend":   round(vol_trend, 2),
-        "trend_pct_30": round(trend_pct_30, 2),
-        "trend_pct_10": round(trend_pct_10, 2),
-        "volatility":  round(volatility, 2),
-        "atr_20":      round(atr_20, 4),
-        "momentum":    round(momentum, 3),
-        "rsi_hist":    round(rsi_hist, 1),
-        "rsi_slope":   round(rsi_slope, 2),
-        "ema10_slope": round(ema10_slope, 3),
-        "ema20_slope": round(ema20_slope, 3),
-        "support_level":    round(support_level, 2),
-        "resistance_level": round(resistance_level, 2),
-        "consec_up":   consec_up,
-        "consec_down": consec_down,
-        "higher_lows": higher_lows,
-        "vol_accumulation": vol_accumulation,
-        "squeeze":     squeeze,
-        "triple_bottom": triple_bottom,
+        "stability":       round(stability, 2),
+        "avg_vol":         float(avg_vol),
+        "vol_trend":       round(vol_trend, 2),
+        "trend_pct_30":    round(trend_pct_30, 2),
+        "trend_pct_10":    round(trend_pct_10, 2),
+        "trend_pct_60":    round(trend_pct_60, 2),
+        "return_3m":       round(return_3m, 2),
+        "volatility":      round(volatility, 2),
+        "atr_20":          round(atr_20, 4),
+        "momentum":        round(momentum, 3),
+        "rsi_hist":        round(rsi_hist, 1),
+        "rsi_slope":       round(rsi_slope, 2),
+        "ema10_slope":     round(ema10_slope, 3),
+        "ema20_slope":     round(ema20_slope, 3),
+        "ema50_slope":     round(ema50_slope, 3),
+        "ema200":          round(float(ema200.iloc[-1]), 2),
+        "support_level":   round(support_level, 2),
+        "resistance_level":round(resistance_level, 2),
+        "consec_up":       consec_up,
+        "consec_down":     consec_down,
+        "higher_lows":     higher_lows,
+        "vol_accumulation":vol_accumulation,
+        "squeeze":         squeeze,
+        "triple_bottom":   triple_bottom,
+        # Wall Street additions
+        "obv_slope":       round(obv_slope, 4),
+        "cmf":             round(cmf, 3),
+        "poc":             round(poc, 2),
+        "vah":             round(vah, 2),
+        "val":             round(val_vp, 2),
+        "bull_divergence": bull_div,
+        "bear_divergence": bear_div,
+        "zscore":          round(zscore, 2),
+        "regime":          regime,
+        "w52_pct":         round(w52_pct, 1),
     }
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -476,159 +608,145 @@ def _session():
     s.mount("https://", HTTPAdapter(max_retries=Retry(
         total=3, backoff_factor=1, status_forcelist=[500,502,503,504]
     )))
-    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+    s.headers["User-Agent"] = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
     return s
 
 @st.cache_data(ttl=20, show_spinner=False)
 def fetch_live() -> list:
-    base_payload = {
+    payload = {
         "sort":    {"sortBy": "volume", "sortOrder": "desc"},
+        "filter":  [{"left": "name", "operation": "in_range", "right": KSE100}],
         "markets": ["pakistan"],
         "columns": TV_COLS,
         "range":   [0, 500],
     }
-    # Try with symbol filter first, then without (fetch all Pakistan and filter locally)
-    payloads = [
-        {**base_payload, "filter": [{"left": "name", "operation": "in_range", "right": KSE100}]},
-        base_payload,
-    ]
-    kse_set = set(KSE100)
-    for payload in payloads:
-        try:
-            r = _session().post(TV_URL, json=payload, timeout=15)
-            r.raise_for_status()
-            data = r.json().get("data", [])
-            if data:
-                # Filter to KSE100 universe when fetching all
-                if "filter" not in payload:
-                    data = [item for item in data if item.get("d", [None])[0] in kse_set]
-                return data
-        except Exception as e:
-            st.error(f"Data fetch error: {e}")
-    return []
+    try:
+        r = _session().post(TV_URL, json=payload, timeout=15)
+        r.raise_for_status()
+        return r.json().get("data", [])
+    except Exception as e:
+        st.error(f"Data fetch error: {e}")
+        return []
 
 def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
-    """Calculates breadth from existing live data."""
-    chgs = []
-    prices = []
-    highs = []
-    lows = []
+    chgs, prices, highs, lows = [], [], [], []
     total_volume = 0
     adv, dec = 0, 0
     for item in raw:
         d = item.get("d", [])
-        if not d or len(d) < 25:
-            continue
-        sym = d[0]
-        chg = safe(d[2])
-        price = safe(d[1])
-        vol = safe(d[3])
+        if not d or len(d) < 25: continue
+        sym  = d[0]
+        chg  = safe(d[2])
+        price= safe(d[1])
+        vol  = safe(d[3])
         high = safe(d[23])
-        low = safe(d[24])
+        low  = safe(d[24])
         if sym in KSE100:
-            chgs.append(chg)
-            prices.append(price)
+            chgs.append(chg); prices.append(price)
             if high > 0: highs.append(high)
-            if low > 0: lows.append(low)
+            if low > 0:  lows.append(low)
             total_volume += vol
             if chg > 0: adv += 1
             elif chg < 0: dec += 1
 
-    avg = float(np.median(chgs)) if chgs else 0.0
+    avg       = float(np.median(chgs)) if chgs else 0.0
     avg_price = sum(prices) / len(prices) if prices else 0.0
-    max_high = max(highs) if highs else 0.0
-    min_low = min(lows) if lows else 0.0
-    bull = avg > CFG["BREADTH_MIN"] and adv > dec
-    
-    kse = {
-        "close": avg_price,
-        "change": avg,
-        "high": max_high,
-        "low": min_low,
-        "volume": total_volume
-    }
+    max_high  = max(highs) if highs else 0.0
+    min_low   = min(lows)  if lows  else 0.0
+    bull      = avg > CFG["BREADTH_MIN"] and adv > dec
+    kse = {"close": avg_price, "change": avg,
+           "high": max_high, "low": min_low, "volume": total_volume}
     return avg, bull, adv, dec, kse
 
 @st.cache_data(ttl=60, show_spinner=False)
 def fetch_kse_index() -> Optional[dict]:
-    """Fetch KSE-100 index data from Sarmaaya API."""
     try:
         r = requests.get(
             "https://beta-restapi.sarmaaya.pk/api/indices/overview/KSE100",
-            timeout=8,
-            headers={"User-Agent": "Mozilla/5.0"}
+            timeout=8
         )
         if r.status_code == 200:
-            data = r.json()
-            # Handle both wrapped and unwrapped response shapes
-            result = data.get("response") or data.get("data") or data
-            if isinstance(result, dict) and ("close" in result or "currentValue" in result):
-                # Normalize keys — Sarmaaya uses different key names across versions
-                normalized = {
-                    "close":         result.get("close") or result.get("currentValue") or result.get("value", 0),
-                    "changePercent": result.get("changePercent") or result.get("percentageChange") or result.get("change", 0),
-                    "volume":        result.get("volume") or result.get("totalVolume", 0),
-                }
-                return normalized
+            return r.json().get("response", {})
     except Exception:
         pass
     return None
 
 # ══════════════════════════════════════════════════════════════════════════════
-# 7-LAYER NORMALIZED SCORING ENGINE (0–100 scale)
-#
-# Each layer has a budget. Raw points within a layer are clamped to that
-# layer's budget. Final score = sum of all clamped layers.
-#
-# Layer 1: Trend Structure   (20 pts max)
-# Layer 2: Momentum Cascade  (20 pts max)
-# Layer 3: Volume Footprint  (15 pts max)
-# Layer 4: Price Pattern      (15 pts max)
-# Layer 5: Breadth / Context  (10 pts max)
-# Layer 6: Volatility State   (10 pts max)
-# Layer 7: Historical Quality (10 pts max)
+# RS RANK COMPUTATION — universe-wide
+# ══════════════════════════════════════════════════════════════════════════════
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_universe_rs_ranks(db_path: str) -> Dict[str, float]:
+    """
+    Compute 3-month RS Rank (1-99) for every symbol with history.
+    Cached 5 min so it doesn't recompute on every render.
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        returns = {}
+        for sym in KSE100:
+            try:
+                df = pd.read_sql(
+                    "SELECT close FROM price_history WHERE symbol=? ORDER BY date DESC LIMIT 65",
+                    conn, params=(sym,)
+                )
+                if len(df) >= 40:
+                    c = df['close'].iloc[::-1]  # oldest first
+                    ret = (c.iloc[-1] / c.iloc[0] - 1) * 100
+                    returns[sym] = ret
+            except Exception:
+                pass
+    finally:
+        conn.close()
+
+    all_rets = list(returns.values())
+    ranks = {}
+    for sym, ret in returns.items():
+        ranks[sym] = _calc_rs_rank(ret, all_rets)
+    return ranks
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# SCORING ENGINE — 9-Layer Wall Street Edition
 # ══════════════════════════════════════════════════════════════════════════════
 
 def _compute_atr_stop(price, atr, hist_atr, mult):
-    """Use live ATR if available, else fall back to historical ATR."""
-    effective_atr = atr if atr > price * 0.002 else hist_atr if hist_atr > 0 else price * 0.015
-    return round(price - mult * effective_atr, 2), effective_atr
+    eff = atr if atr > price * 0.002 else (hist_atr if hist_atr > 0 else price * 0.015)
+    return round(price - mult * eff, 2), eff
 
 def _bb_position(price, bb_low, bb_high, bb_basis):
-    """Returns position within Bollinger Bands (0=lower, 0.5=mid, 1=upper)."""
     span = bb_high - bb_low
     if span <= 0: return 0.5
     return max(0.0, min(1.0, (price - bb_low) / span))
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# INTRADAY SCALP SCORER  (normalized 0–100)
+# INTRADAY SCALP SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 def score_intraday(
     price, change, rsi, macd, macd_sig, macd_hist,
     ema5, ema10, vwap, adx, stoch_k, stoch_d,
     vol, avg_vol, atr, bb_low, bb_high, bb_basis,
-    open_p, high_d, low_d,
-    bullish, mkt_chg, hist, rsi_prev
+    open_p, high_d, low_d, bullish, mkt_chg, hist, rsi_prev,
+    rs_rank: float = 50.0
 ) -> Tuple[int, List[str], float, float, str, int]:
 
     reasons = []
-    layers_active = 0  # count how many layers contributed positively
+    layers_active = 0
 
-    # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
-    if price < CFG["MIN_PRICE"]:       return 0, [], 0, 0, "D", 0
-    if vol < CFG["MIN_VOLUME"]:        return 0, [], 0, 0, "D", 0
-    if vol_ratio < 0.7:               return 0, [], 0, 0, "D", 0
-    if price < vwap * 0.98:            return 0, [], 0, 0, "D", 0
+    if price < CFG["MIN_PRICE"]:    return 0, [], 0, 0, "D", 0
+    if vol < CFG["MIN_VOLUME"]:     return 0, [], 0, 0, "D", 0
+    if vol_ratio < 0.7:             return 0, [], 0, 0, "D", 0
+    if price < vwap * 0.98:         return 0, [], 0, 0, "D", 0
 
-    # ── LAYER 1: TREND STRUCTURE (max 20) ─────────────────────────────────────
+    # ── L1: Multi-TF Trend (18) ──────────────────────────────────────────────
     L1 = 0
     if open_p > 0 and price > open_p and change > 1.0:
-        L1 += 5; reasons.append("Gap Up")
+        L1 += 4; reasons.append("Gap Up")
     if ema5 > 0 and ema10 > 0:
         if price > ema5 > ema10:
-            L1 += 10; reasons.append("EMA Alignment")
+            L1 += 9; reasons.append("EMA Alignment")
         elif price > ema5 and price > ema10:
             L1 += 5; reasons.append("Above EMAs")
     if adx >= 35:
@@ -637,114 +755,124 @@ def score_intraday(
         L1 += 5; reasons.append(f"ADX {adx:.0f}")
     elif adx < 20:
         L1 -= 4
+    # 200-day regime context
+    if hist["regime"] == "BULL":
+        L1 += 2
+    elif hist["regime"] == "BEAR":
+        L1 -= 3
     L1 = _clamp(L1, -5, LAYER_BUDGET["trend"])
     if L1 > 0: layers_active += 1
 
-    # ── LAYER 2: MOMENTUM CASCADE (max 20) ────────────────────────────────────
+    # ── L2: Momentum Cascade + RS Rank (17) ──────────────────────────────────
     L2 = 0
     rs_alpha = change - mkt_chg
     if rs_alpha > 1.5:
-        L2 += 5; reasons.append(f"RS +{rs_alpha:.1f}%")
+        L2 += 4; reasons.append(f"RS +{rs_alpha:.1f}%")
+    # O'Neil RS Rank
+    if rs_rank >= 80:
+        L2 += 4; reasons.append(f"RS#{rs_rank:.0f}")
+    elif rs_rank >= 60:
+        L2 += 2
+    elif rs_rank < 30:
+        L2 -= 3
     if macd > macd_sig and macd_hist > 0 and macd > 0:
-        L2 += 6; reasons.append("MACD Bull")
+        L2 += 5; reasons.append("MACD Bull")
     elif macd < macd_sig:
         L2 -= 3
-
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if rsi < 40 and rsi_delta > 4:
-        L2 += 8; reasons.append("Oversold Reversal")
+        L2 += 7; reasons.append("Oversold Reversal")
     elif 52 < rsi < 75:
         L2 += 4; reasons.append(f"RSI {rsi:.0f}")
-        if rsi_delta > 3:
-            L2 += 2
+        if rsi_delta > 3: L2 += 2
     elif rsi >= 75:
         L2 -= 6; reasons.append("Overbought")
-
+    if hist["bull_divergence"]:
+        L2 += 3; reasons.append("RSI Divergence")
     if stoch_k > stoch_d and 30 < stoch_k < 85:
-        L2 += 4; reasons.append("Stoch Cross")
+        L2 += 3; reasons.append("Stoch Cross")
     elif stoch_k > 85:
         L2 -= 2
     L2 = _clamp(L2, -5, LAYER_BUDGET["momentum"])
     if L2 > 0: layers_active += 1
 
-    # ── LAYER 3: VOLUME FOOTPRINT (max 15) ────────────────────────────────────
+    # ── L3: Volume Footprint (13) ─────────────────────────────────────────────
     L3 = 0
     if vol_ratio >= CFG["INST_VOL_X"]:
-        L3 += 12; reasons.append(f"{vol_ratio:.1f}x High Volume")
+        L3 += 10; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 2.0:
-        L3 += 8; reasons.append(f"{vol_ratio:.1f}x Volume")
+        L3 += 7; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 1.5:
         L3 += 4
     elif vol_ratio >= 1.0:
         L3 += 2
-
     if hist["vol_accumulation"]:
         L3 += 3; reasons.append("Accumulation")
     L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
     if L3 > 0: layers_active += 1
 
-    # ── LAYER 4: PRICE PATTERN (max 15) ───────────────────────────────────────
+    # ── L4: Price Pattern + Mean Reversion (12) ──────────────────────────────
     L4 = 0
     vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
     if -0.5 < vwap_dist < 0.5:
-        L4 += 8; reasons.append("VWAP Bounce")
+        L4 += 7; reasons.append("VWAP Bounce")
     elif 0.5 <= vwap_dist < 1.2:
         L4 += 4; reasons.append("VWAP Edge")
     elif vwap_dist > 3.0:
         L4 -= 3
-
+    # POC magnet
+    if hist["poc"] > 0:
+        poc_dist = abs(price - hist["poc"]) / hist["poc"] * 100
+        if poc_dist < 1.5:
+            L4 += 4; reasons.append("POC Zone")
+    # Z-score: prefer moderate compression
+    z = hist["zscore"]
+    if -0.5 < z < 0.5:
+        L4 += 2  # compressed — ready to move
+    elif z > 2.5:
+        L4 -= 3  # stretched above mean
     if bb_basis > 0:
         dist_basis = (price / bb_basis - 1) * 100
         if 0 < dist_basis < 1.5:
-            L4 += 4; reasons.append("Mean Reversion")
-
+            L4 += 3; reasons.append("Mean Reversion")
     day_range = high_d - low_d
     if day_range > 0:
         candle_pos = (price - low_d) / day_range
         if candle_pos > 0.7:
-            L4 += 3; reasons.append("Day High Zone")
+            L4 += 2; reasons.append("Day High Zone")
         elif candle_pos < 0.3:
             L4 -= 2
-
     if hist["squeeze"] and change > 1.0:
         L4 += 4; reasons.append("BB Squeeze Break")
-
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
-    if bb_pos > 0.92:
-        L4 -= 3
+    if bb_pos > 0.92: L4 -= 3
     L4 = _clamp(L4, -5, LAYER_BUDGET["pattern"])
     if L4 > 0: layers_active += 1
 
-    # ── LAYER 5: BREADTH & CONTEXT (max 10) ───────────────────────────────────
+    # ── L5: Breadth (8) ───────────────────────────────────────────────────────
     L5 = 0
     if bullish:
-        L5 += 7
+        L5 += 6
     else:
         L5 -= 5; reasons.append("Bearish Breadth")
     L5 = _clamp(L5, -5, LAYER_BUDGET["breadth"])
     if L5 > 0: layers_active += 1
 
-    # ── LAYER 6: VOLATILITY STATE (max 10) ────────────────────────────────────
+    # ── L6: Volatility State (8) ──────────────────────────────────────────────
     L6 = 0
     hvol = hist["volatility"]
-    if 20 < hvol < 45:
-        L6 += 7  # ideal tradeable range
-    elif 45 <= hvol < 65:
-        L6 += 3  # elevated but tradeable
-    elif hvol >= 65:
-        L6 -= 4  # too erratic
-    elif hvol <= 10:
-        L6 -= 2  # too dead
-
-    if hist["consec_up"] >= 3:
-        L6 += 3
+    if 20 < hvol < 45:   L6 += 6
+    elif 45 <= hvol < 65: L6 += 3
+    elif hvol >= 65:      L6 -= 4
+    elif hvol <= 10:      L6 -= 2
+    if hist["consec_up"] >= 3: L6 += 2
     L6 = _clamp(L6, -5, LAYER_BUDGET["volatility"])
     if L6 > 0: layers_active += 1
 
-    # ── LAYER 7: HISTORICAL QUALITY (max 10) ──────────────────────────────────
+    # ── L7: Historical Quality (10) ───────────────────────────────────────────
     L7 = 0
     if hist["momentum"] > 0.5:
-        L7 += 5; reasons.append("Hist Momentum")
+        L7 += 4; reasons.append("Hist Momentum")
     if hist["trend_pct_10"] > 2:
         L7 += 3
     if hist["stability"] >= 6:
@@ -754,27 +882,43 @@ def score_intraday(
     L7 = _clamp(L7, -3, LAYER_BUDGET["historical"])
     if L7 > 0: layers_active += 1
 
-    # ── FINAL SCORE ──────────────────────────────────────────────────────────
-    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7)
+    # ── L8: Institutional Flow (10) ── NEW ──────────────────────────────────
+    L8 = 0
+    if hist["obv_slope"] > 0.1:
+        L8 += 5; reasons.append("OBV Rising")
+    elif hist["obv_slope"] < -0.1:
+        L8 -= 3
+    if hist["cmf"] > 0.1:
+        L8 += 5; reasons.append(f"CMF {hist['cmf']:.2f}")
+    elif hist["cmf"] < -0.1:
+        L8 -= 3
+    L8 = _clamp(L8, -4, LAYER_BUDGET["flow"])
+    if L8 > 0: layers_active += 1
 
-    # ── CONFLUENCE GATE: require at least 4 layers contributing ──────────────
+    # ── L9: Market Regime (4) ── NEW ─────────────────────────────────────────
+    L9 = 0
+    regime = hist["regime"]
+    if regime == "BULL":
+        L9 += 4
+    elif regime == "BEAR":
+        L9 -= 3
+    L9 = _clamp(L9, -3, LAYER_BUDGET["regime"])
+    if L9 > 0: layers_active += 1
+
+    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7 + L8 + L9)
     if layers_active < 4:
-        score = min(score, THRESH_INTRA - 1)  # cap below threshold
+        score = min(score, THRESH_INTRA - 1)
 
-    # ── TARGET & STOP (ATR-based) ─────────────────────────────────────────────
     stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], 0.6)
-    # Dynamic target: 2x ATR for intraday, with floor of 2% and cap of 6%
     raw_target_pct = (2.0 * eff_atr / price) * 100
     target_pct = _clamp(raw_target_pct, 2.0, 6.0)
     target = round(price * (1 + target_pct / 100), 2)
 
-    grade = _grade(score, layers_active)
-
-    return score, reasons, target, stop, grade, layers_active
+    return score, reasons, target, stop, _grade(score, layers_active), layers_active
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# SWING TRADE SCORER  (normalized 0–100)
+# SWING TRADE SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 def score_swing(
     price, change, rsi, macd, macd_sig, macd_hist,
@@ -782,60 +926,68 @@ def score_swing(
     adx, atr, stoch_k, stoch_d,
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m, low1m, high1m,
-    bullish, mkt_chg, rsi_prev, hist
+    bullish, mkt_chg, rsi_prev, hist,
+    rs_rank: float = 50.0
 ) -> Tuple[int, List[str], float, float, str, int]:
 
     reasons = []
     layers_active = 0
 
-    # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
-    if price < CFG["MIN_PRICE"]:       return 0, [], 0, 0, "D", 0
-    if vol < CFG["MIN_VOLUME"] * 0.8:  return 0, [], 0, 0, "D", 0
-    if price < ema50 * 0.985:         return 0, [], 0, 0, "D", 0
-    if adx < 12:                      return 0, [], 0, 0, "D", 0
+    if price < CFG["MIN_PRICE"]:         return 0, [], 0, 0, "D", 0
+    if vol < CFG["MIN_VOLUME"] * 0.8:    return 0, [], 0, 0, "D", 0
+    if price < ema50 * 0.985:            return 0, [], 0, 0, "D", 0
+    if adx < 12:                         return 0, [], 0, 0, "D", 0
 
-    # ── LAYER 1: TREND STRUCTURE (max 20) ─────────────────────────────────────
+    # ── L1: Multi-TF Trend (18) ──────────────────────────────────────────────
     L1 = 0
     if ema5 > 0 and price > ema5 > ema10 > ema20 > ema50:
-        L1 += 16; reasons.append("Full EMA Fan")
+        L1 += 14; reasons.append("Full EMA Fan")
     elif price > ema10 > ema20 > ema50:
-        L1 += 12; reasons.append("EMA Fan")
+        L1 += 10; reasons.append("EMA Fan")
     elif price > ema20 > ema50:
-        L1 += 6
-
+        L1 += 5
     if hist["higher_lows"]:
-        L1 += 5; reasons.append("Higher Lows")
-
+        L1 += 4; reasons.append("Higher Lows")
     if adx >= 30:
-        L1 += 5; reasons.append(f"ADX {adx:.0f}")
+        L1 += 4; reasons.append(f"ADX {adx:.0f}")
+    # 200-day anchoring
+    if hist["ema200"] > 0 and price > hist["ema200"]:
+        L1 += 2; reasons.append("Above MA200")
+    if hist["regime"] == "BULL":
+        L1 += 2
+    elif hist["regime"] == "BEAR":
+        L1 -= 3
     L1 = _clamp(L1, 0, LAYER_BUDGET["trend"])
     if L1 > 0: layers_active += 1
 
-    # ── LAYER 2: MOMENTUM CASCADE (max 20) ────────────────────────────────────
+    # ── L2: Momentum + RS Rank (17) ──────────────────────────────────────────
     L2 = 0
     rs_alpha = change - mkt_chg
     if rs_alpha > 1.0:
-        L2 += 4; reasons.append(f"RS +{rs_alpha:.1f}%")
-
+        L2 += 3; reasons.append(f"RS +{rs_alpha:.1f}%")
+    if rs_rank >= 80:
+        L2 += 5; reasons.append(f"RS#{rs_rank:.0f}")
+    elif rs_rank >= 65:
+        L2 += 3
+    elif rs_rank < 25:
+        L2 -= 4
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if rsi < 42 and rsi_delta > 3:
-        L2 += 8; reasons.append("Oversold Reversal")
+        L2 += 7; reasons.append("Oversold Reversal")
     elif 45 < rsi < 60:
-        L2 += 6; reasons.append(f"RSI {rsi:.0f} Ideal")
+        L2 += 5; reasons.append(f"RSI {rsi:.0f} Ideal")
     elif rsi > 72:
         L2 -= 6; reasons.append("RSI Overbought")
-
+    if hist["bull_divergence"]:
+        L2 += 4; reasons.append("RSI Divergence")
     if macd > macd_sig and macd_hist > 0:
-        L2 += 6; reasons.append("MACD Bullish")
+        L2 += 5; reasons.append("MACD Bullish")
     elif macd < macd_sig and macd_hist < 0:
         L2 -= 4
-
     if stoch_k > stoch_d and stoch_k < 80:
-        L2 += 4; reasons.append("Stoch Cross")
-
+        L2 += 3; reasons.append("Stoch Cross")
     if hist["ema10_slope"] > 0 and hist["ema20_slope"] > 0:
-        L2 += 3; reasons.append("Trend Slopes Rising")
-
+        L2 += 2; reasons.append("Slopes Rising")
     if chg1w > 2:
         L2 += 3; reasons.append("Weekly Momentum")
     elif chg1w > 0:
@@ -845,76 +997,73 @@ def score_swing(
     L2 = _clamp(L2, -5, LAYER_BUDGET["momentum"])
     if L2 > 0: layers_active += 1
 
-    # ── LAYER 3: VOLUME FOOTPRINT (max 15) ────────────────────────────────────
+    # ── L3: Volume (13) ───────────────────────────────────────────────────────
     L3 = 0
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if vol_ratio >= 2.5:
-        L3 += 10; reasons.append(f"{vol_ratio:.1f}x High Volume")
+        L3 += 9; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 1.7:
-        L3 += 6; reasons.append(f"{vol_ratio:.1f}x Volume")
+        L3 += 6; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 1.2:
         L3 += 2
-
     if hist["vol_accumulation"]:
-        L3 += 5; reasons.append("Accumulation")
+        L3 += 4; reasons.append("Accumulation")
     L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
     if L3 > 0: layers_active += 1
 
-    # ── LAYER 4: PRICE PATTERN (max 15) ───────────────────────────────────────
+    # ── L4: Price Pattern + Mean Reversion (12) ──────────────────────────────
     L4 = 0
     if high1m > low1m > 0:
         range1m = high1m - low1m
-        pos1m = (price - low1m) / range1m
+        pos1m   = (price - low1m) / range1m
         if 0.08 < pos1m < 0.30:
-            L4 += 8; reasons.append("Early Cycle")
-
+            L4 += 7; reasons.append("Early Cycle")
     if hist["support_level"] > 0 and price > 0:
         support_gap = (price / hist["support_level"] - 1) * 100
         if 0 < support_gap < 4:
             L4 += 4; reasons.append("Near Support")
-
+    # Value Area Low from volume profile
+    if hist["val"] > 0:
+        val_dist = (price - hist["val"]) / hist["val"] * 100
+        if 0 < val_dist < 3:
+            L4 += 4; reasons.append("VA Low")
     if bb_basis > 0:
         dist_basis = (price / bb_basis - 1) * 100
         if -1 < dist_basis < 2:
-            L4 += 5; reasons.append("Mean Reversion")
-
+            L4 += 4; reasons.append("Mean Reversion")
     if hist["squeeze"]:
-        L4 += 5; reasons.append("BB Squeeze")
+        L4 += 4; reasons.append("BB Squeeze")
+    z = hist["zscore"]
+    if -1.5 < z < 0:
+        L4 += 3; reasons.append("Compressed")
+    elif z < -2.0:
+        L4 -= 2
     L4 = _clamp(L4, 0, LAYER_BUDGET["pattern"])
     if L4 > 0: layers_active += 1
 
-    # ── LAYER 5: BREADTH & CONTEXT (max 10) ───────────────────────────────────
+    # ── L5: Breadth (8) ───────────────────────────────────────────────────────
     L5 = 0
     if bullish:
-        L5 += 7
+        L5 += 6
     else:
         L5 -= 5; reasons.append("Bearish Breadth")
     L5 = _clamp(L5, -5, LAYER_BUDGET["breadth"])
     if L5 > 0: layers_active += 1
 
-    # ── LAYER 6: VOLATILITY STATE (max 10) ────────────────────────────────────
+    # ── L6: Volatility (8) ────────────────────────────────────────────────────
     L6 = 0
     hvol = hist["volatility"]
-    if 15 < hvol < 45:
-        L6 += 7  # ideal swing range
-    elif 45 <= hvol < 60:
-        L6 += 2
-    elif hvol >= 70:
-        L6 -= 4
-    elif hvol <= 8:
-        L6 -= 2
-
-    if hist["consec_up"] >= 2:
-        L6 += 3
-    elif hist["consec_down"] >= 4:
-        L6 -= 3
-
-    if hist["trend_pct_10"] > 2:
-        L6 += 2
+    if 15 < hvol < 45:   L6 += 6
+    elif 45 <= hvol < 60: L6 += 2
+    elif hvol >= 70:      L6 -= 4
+    elif hvol <= 8:       L6 -= 2
+    if hist["consec_up"] >= 2:   L6 += 2
+    elif hist["consec_down"] >= 4: L6 -= 3
+    if hist["trend_pct_10"] > 2: L6 += 1
     L6 = _clamp(L6, -5, LAYER_BUDGET["volatility"])
     if L6 > 0: layers_active += 1
 
-    # ── LAYER 7: HISTORICAL QUALITY (max 10) ──────────────────────────────────
+    # ── L7: Historical Quality (10) ───────────────────────────────────────────
     L7 = 0
     if hist["stability"] >= 7:
         L7 += 5; reasons.append("Stable")
@@ -922,86 +1071,100 @@ def score_swing(
         L7 += 2
     elif hist["stability"] < 3:
         L7 -= 3
-
     if hist["momentum"] > 1.0:
         L7 += 3; reasons.append("Hist Momentum")
     elif hist["momentum"] < -1.0:
         L7 -= 2
-
     if hist["trend_pct_30"] > 8:
         L7 += 3; reasons.append("30d Uptrend")
+    # 52-week position
+    w52 = hist["w52_pct"]
+    if 25 < w52 < 65:
+        L7 += 2; reasons.append(f"52W@{w52:.0f}%")
+    elif w52 > 90:
+        L7 -= 2
     L7 = _clamp(L7, -3, LAYER_BUDGET["historical"])
     if L7 > 0: layers_active += 1
 
-    # ── FINAL SCORE ──────────────────────────────────────────────────────────
-    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7)
+    # ── L8: Institutional Flow (10) ── NEW ───────────────────────────────────
+    L8 = 0
+    if hist["obv_slope"] > 0.15:
+        L8 += 5; reasons.append("OBV Rising")
+    elif hist["obv_slope"] < -0.1:
+        L8 -= 3
+    if hist["cmf"] > 0.1:
+        L8 += 5; reasons.append(f"CMF {hist['cmf']:.2f}")
+    elif hist["cmf"] < -0.15:
+        L8 -= 3
+    L8 = _clamp(L8, -4, LAYER_BUDGET["flow"])
+    if L8 > 0: layers_active += 1
 
+    # ── L9: Market Regime (4) ── NEW ─────────────────────────────────────────
+    L9 = 0
+    if hist["regime"] == "BULL": L9 += 4
+    elif hist["regime"] == "BEAR": L9 -= 3
+    L9 = _clamp(L9, -3, LAYER_BUDGET["regime"])
+    if L9 > 0: layers_active += 1
+
+    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7 + L8 + L9)
     if layers_active < 4:
         score = min(score, THRESH_SWING - 1)
 
-    # ── TARGET & STOP (ATR-based) ─────────────────────────────────────────────
     stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], 1.5)
     raw_target_pct = (3.0 * eff_atr / price) * 100
-    target_pct = _clamp(raw_target_pct, 4.0, 10.0)
+    target_pct = _clamp(raw_target_pct, 4.0, 12.0)
     target = round(price * (1 + target_pct / 100), 2)
 
-    grade = _grade(score, layers_active)
-
-    return score, reasons, target, stop, grade, layers_active
+    return score, reasons, target, stop, _grade(score, layers_active), layers_active
 
 
 # ─────────────────────────────────────────────────────────────────────────────
-# LONG-TERM INVESTMENT SCORER  (normalized 0–100)
+# LONG-TERM INVESTMENT SCORER
 # ─────────────────────────────────────────────────────────────────────────────
 def score_longterm(
     price, rsi, macd, macd_sig, macd_hist,
     ema20, ema50, stoch_k, stoch_d,
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m, low1m, high1m,
-    sector, rsi_prev, hist
+    sector, rsi_prev, hist,
+    rs_rank: float = 50.0
 ) -> Tuple[int, List[str], float, float, str, int]:
 
     reasons = []
     layers_active = 0
     quality = SECTORS.get(sector, {"quality": 5})["quality"]
 
-    # ── PRE-FLIGHT GATES ──────────────────────────────────────────────────────
     if price < CFG["MIN_PRICE"]:       return 0, [], 0, 0, "D", 0
-    if quality < 6:                   return 0, [], 0, 0, "D", 0
-    if hist["stability"] < 2.0:       return 0, [], 0, 0, "D", 0
+    if quality < 6:                    return 0, [], 0, 0, "D", 0
+    if hist["stability"] < 2.0:        return 0, [], 0, 0, "D", 0
 
-    # ── LAYER 1: SECTOR & FUNDAMENTAL QUALITY (max 20) ────────────────────────
-    L1 = 0
-    if quality == 9:
-        L1 += 10
-    elif quality == 8:
-        L1 += 8
-    elif quality == 7:
-        L1 += 6
-    else:
-        L1 += 3
-
-    # Trend infrastructure
+    # ── L1: Sector Quality + Trend (18) ──────────────────────────────────────
+    L1 = {9: 10, 8: 8, 7: 6}.get(quality, 3)
     if price > ema50:
-        L1 += 6; reasons.append("Above EMA50")
+        L1 += 5; reasons.append("Above EMA50")
     elif price > ema50 * 0.97:
         L1 += 2
     if price > ema20:
-        L1 += 4; reasons.append("Above EMA20")
+        L1 += 3; reasons.append("Above EMA20")
+    if hist["ema200"] > 0 and price > hist["ema200"]:
+        L1 += 3; reasons.append("Above MA200")
+    if hist["regime"] == "BULL":
+        L1 += 2
+    elif hist["regime"] == "BEAR":
+        L1 -= 4
     L1 = _clamp(L1, 0, LAYER_BUDGET["trend"])
     if L1 > 0: layers_active += 1
 
-    # ── LAYER 2: VALUE ZONE / REVERSAL MOMENTUM (max 20) ─────────────────────
+    # ── L2: Value Zone + RS Rank (17) ────────────────────────────────────────
     L2 = 0
     if high1m > low1m > 0:
         dist_low = (price / low1m - 1) * 100
         if hist["triple_bottom"] and dist_low < 5:
-            L2 += 14; reasons.append("Triple Bottom")
+            L2 += 13; reasons.append("Triple Bottom")
         elif 0.3 < dist_low < 4 and rsi > 28:
             L2 += 8; reasons.append("Near Monthly Low")
         elif dist_low < 10:
             L2 += 5; reasons.append("Value Zone")
-
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if 20 < rsi < 35:
         L2 += 5; reasons.append("Oversold")
@@ -1011,112 +1174,131 @@ def score_longterm(
         L2 += 1
     elif rsi > 75:
         L2 -= 8; reasons.append("Expensive")
-
     if rsi_delta > 3:
         L2 += 3; reasons.append("Momentum Turn")
-
+    if hist["bull_divergence"]:
+        L2 += 4; reasons.append("RSI Divergence")
+    # RS Rank: for long-term, prefer rebuilding stocks (30-60 range)
+    if 30 <= rs_rank <= 65:
+        L2 += 3; reasons.append(f"RS#{rs_rank:.0f} Rebuild")
+    elif rs_rank > 85:
+        L2 -= 2  # already extended
     if chg1m < -25:
         L2 -= 5; reasons.append("Falling Knife")
     L2 = _clamp(L2, -10, LAYER_BUDGET["momentum"])
     if L2 > 0: layers_active += 1
 
-    # ── LAYER 3: VOLUME PATTERN (max 15) ──────────────────────────────────────
+    # ── L3: Volume (13) ───────────────────────────────────────────────────────
     L3 = 0
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if hist["vol_accumulation"]:
-        L3 += 8; reasons.append("Accumulation")
+        L3 += 7; reasons.append("Accumulation")
     if vol_ratio >= 1.5 and rsi < 50:
-        L3 += 5; reasons.append("Vol + RSI Reset")
+        L3 += 4; reasons.append("Vol + RSI Reset")
     elif vol_ratio >= 1.2:
         L3 += 2
+    # CMF as proxy for institutional buying
+    if hist["cmf"] > 0.05:
+        L3 += 2; reasons.append("CMF+")
     L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
     if L3 > 0: layers_active += 1
 
-    # ── LAYER 4: PRICE PATTERN (max 15) ───────────────────────────────────────
+    # ── L4: Price Pattern + Value Area (12) ──────────────────────────────────
     L4 = 0
-    if bb_basis > 0:
-        dist_basis = (price / bb_basis - 1) * 100
-        if dist_basis < 0:
-            L4 += 6; reasons.append("Below Mean")
-
+    if bb_basis > 0 and (price / bb_basis - 1) * 100 < 0:
+        L4 += 5; reasons.append("Below Mean")
     if hist["support_level"] > 0 and price > 0:
         gap = (price / hist["support_level"] - 1) * 100
         if 0 < gap < 3:
             L4 += 4; reasons.append("Near Support")
-
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
     if bb_pos < 0.15:
         L4 += 5; reasons.append("Near BB Low")
     elif bb_pos < 0.35:
         L4 += 2
-
     if hist["squeeze"]:
         L4 += 3; reasons.append("BB Squeeze")
-
     if hist["higher_lows"]:
-        L4 += 4; reasons.append("Higher Lows")
+        L4 += 3; reasons.append("Higher Lows")
+    # Volume Profile VAL
+    if hist["val"] > 0:
+        val_dist = (price - hist["val"]) / hist["val"] * 100
+        if -2 < val_dist < 4:
+            L4 += 3; reasons.append("Vol Profile Support")
     L4 = _clamp(L4, 0, LAYER_BUDGET["pattern"])
     if L4 > 0: layers_active += 1
 
-    # ── LAYER 5: BREADTH & MACRO CONTEXT (max 10) ────────────────────────────
+    # ── L5: Breadth / Macro (8) ───────────────────────────────────────────────
     L5 = 0
     if stoch_k > stoch_d and stoch_k < 50:
         L5 += 4; reasons.append("Stoch Recovery")
     if macd_hist > 0:
-        L5 += 4; reasons.append("MACD Hist+")
+        L5 += 3; reasons.append("MACD Hist+")
     elif macd > macd_sig:
         L5 += 2
     if -3 < chg1w < 3:
-        L5 += 2
+        L5 += 1
     elif chg1w < -8:
         L5 -= 3
     L5 = _clamp(L5, -3, LAYER_BUDGET["breadth"])
     if L5 > 0: layers_active += 1
 
-    # ── LAYER 6: VOLATILITY STATE (max 10) ────────────────────────────────────
+    # ── L6: Volatility (8) ────────────────────────────────────────────────────
     L6 = 0
     hvol = hist["volatility"]
-    if hvol < 40:
-        L6 += 6  # controlled
-    elif 40 <= hvol < 60:
-        L6 += 2
-    elif hvol >= 60:
-        L6 -= 3  # chaotic
-
+    if hvol < 40:        L6 += 5
+    elif 40 <= hvol < 60: L6 += 2
+    elif hvol >= 60:     L6 -= 3
     if hist["ema20_slope"] > 0.2:
-        L6 += 4; reasons.append("EMA20 Rising")
-
-    if chg1m > -5:
-        L6 += 2
-    elif chg1m < -15:
-        L6 -= 2
+        L6 += 3; reasons.append("EMA20 Rising")
+    if chg1m > -5:  L6 += 1
+    elif chg1m < -15: L6 -= 2
     L6 = _clamp(L6, -3, LAYER_BUDGET["volatility"])
     if L6 > 0: layers_active += 1
 
-    # ── LAYER 7: HISTORICAL QUALITY (max 10) ──────────────────────────────────
+    # ── L7: Historical Quality (10) ───────────────────────────────────────────
     L7 = 0
     if hist["stability"] >= 6:
         L7 += 5
     elif hist["stability"] >= 4:
         L7 += 2
-
     if hist["trend_pct_30"] > 5:
         L7 += 3; reasons.append("30d Trend")
-
-    if hist["consec_up"] >= 2:
-        L7 += 2
-    elif hist["consec_down"] >= 3:
-        L7 -= 2
+    if hist["consec_up"] >= 2: L7 += 2
+    elif hist["consec_down"] >= 3: L7 -= 2
+    # 52-week position: value buys in lower half
+    w52 = hist["w52_pct"]
+    if w52 < 40:
+        L7 += 3; reasons.append(f"52W Low@{w52:.0f}%")
+    elif w52 > 85:
+        L7 -= 1
     L7 = _clamp(L7, -2, LAYER_BUDGET["historical"])
     if L7 > 0: layers_active += 1
 
-    # ── FINAL SCORE ──────────────────────────────────────────────────────────
-    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7)
+    # ── L8: Institutional Flow (10) ── NEW ───────────────────────────────────
+    L8 = 0
+    if hist["obv_slope"] > 0.1:
+        L8 += 5; reasons.append("OBV Rising")
+    elif hist["obv_slope"] < -0.15:
+        L8 -= 4
+    if hist["cmf"] > 0.1:
+        L8 += 5; reasons.append(f"CMF {hist['cmf']:.2f}")
+    elif hist["cmf"] < -0.15:
+        L8 -= 4
+    L8 = _clamp(L8, -5, LAYER_BUDGET["flow"])
+    if L8 > 0: layers_active += 1
 
+    # ── L9: Market Regime (4) ── NEW ─────────────────────────────────────────
+    L9 = 0
+    if hist["regime"] == "BULL": L9 += 4
+    elif hist["regime"] == "BEAR": L9 -= 4
+    L9 = _clamp(L9, -4, LAYER_BUDGET["regime"])
+    if L9 > 0: layers_active += 1
+
+    score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7 + L8 + L9)
     if layers_active < 4:
         score = min(score, THRESH_LONG - 1)
 
-    # ── TARGET & STOP ─────────────────────────────────────────────────────────
     if low1m > 0 and (price / low1m - 1) * 100 < 6:
         target = round(price * 1.55, 2)
     elif low1m > 0 and (price / low1m - 1) * 100 < 15:
@@ -1124,11 +1306,10 @@ def score_longterm(
     else:
         target = round(price * 1.20, 2)
 
-    stop = max(round(price * 0.88, 2), round(hist["support_level"] * 0.97, 2)) if hist["support_level"] > 0 else round(price * 0.88, 2)
+    stop_floor = round(hist["support_level"] * 0.97, 2) if hist["support_level"] > 0 else 0
+    stop = max(round(price * 0.88, 2), stop_floor) if stop_floor > 0 else round(price * 0.88, 2)
 
-    grade = _grade(score, layers_active)
-
-    return score, reasons, target, stop, grade, layers_active
+    return score, reasons, target, stop, _grade(score, layers_active), layers_active
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1141,6 +1322,9 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
 
     intra, swing, long_, dips = [], [], [], []
 
+    # Pre-fetch RS ranks once
+    rs_ranks = compute_universe_rs_ranks(CFG["DB_PATH"])
+
     conn = sqlite3.connect(CFG["DB_PATH"])
     try:
         for item in raw:
@@ -1148,162 +1332,178 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             if len(d) < 27 or not d[0]:
                 continue
 
-            sym      = d[0]
-            price    = safe(d[1])
-            change   = safe(d[2])
-            vol      = safe(d[3])
-            rv       = safe(d[4])
-            avg_vol  = safe(d[5])
-            rsi      = safe(d[6], 50)
-            macd     = safe(d[7])
-            macd_sig = safe(d[8])
-            bb_low   = safe(d[9])
-            bb_high  = safe(d[10])
-            ema20    = safe(d[11])
-            ema50    = safe(d[12])
-            chg1w    = safe(d[13])
-            high1m   = safe(d[14])
-            low1m    = safe(d[15])
-            vwap     = safe(d[16]) or price
-            ema10    = safe(d[17])
-            adx      = safe(d[18])
-            atr      = safe(d[19])
-            stoch_k  = safe(d[20], 50)
-            stoch_d  = safe(d[21], 50)
-            open_p   = safe(d[22])
-            high_d   = safe(d[23])
-            low_d    = safe(d[24])
-            ema5     = safe(d[25])
-            chg1m    = safe(d[26]) # This is correct
-            low7d    = safe(d[28]) if len(d) > 28 else low_d
-            rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
-            macd_h   = safe(d[29]) if len(d) > 29 else (macd - macd_sig)
-            bb_basis = safe(d[31]) if len(d) > 31 else (bb_low + bb_high) / 2
+            sym       = d[0]
+            price     = safe(d[1])
+            change    = safe(d[2])
+            vol       = safe(d[3])
+            rv        = safe(d[4])
+            avg_vol   = safe(d[5])
+            rsi       = safe(d[6], 50)
+            macd      = safe(d[7])
+            macd_sig  = safe(d[8])
+            bb_low    = safe(d[9])
+            bb_high   = safe(d[10])
+            ema20     = safe(d[11])
+            ema50     = safe(d[12])
+            chg1w     = safe(d[13])
+            high1m    = safe(d[14])
+            low1m     = safe(d[15])
+            vwap      = safe(d[16]) or price
+            ema10     = safe(d[17])
+            adx       = safe(d[18])
+            atr       = safe(d[19])
+            stoch_k   = safe(d[20], 50)
+            stoch_d   = safe(d[21], 50)
+            open_p    = safe(d[22])
+            high_d    = safe(d[23])
+            low_d     = safe(d[24])
+            ema5      = safe(d[25])
+            chg1m     = safe(d[26])
+            rsi_prev  = safe(d[27], rsi) if len(d) > 27 else rsi
+            low7d     = safe(d[28]) if len(d) > 28 else low_d
+            macd_h    = safe(d[29]) if len(d) > 29 else (macd - macd_sig)
+            bb_basis  = safe(d[31]) if len(d) > 31 else (bb_low + bb_high) / 2
+            # New extended fields
+            high3m    = safe(d[33]) if len(d) > 33 else high1m
+            low3m     = safe(d[34]) if len(d) > 34 else low1m
+            high6m    = safe(d[35]) if len(d) > 35 else high3m
+            low6m     = safe(d[36]) if len(d) > 36 else low3m
 
             if price <= 0 or avg_vol <= 0:
                 continue
 
-            sector = SYM_SECTOR.get(sym, "Misc")
-            hist = get_hist_metrics(sym, conn)
+            sector  = SYM_SECTOR.get(sym, "Misc")
+            hist    = get_hist_metrics(sym, conn)
+            rs_rank = rs_ranks.get(sym, 50.0)
 
-            # Standard Pivot Calculation
-            h_piv, l_piv = (high_d if high_d > 0 else price), (low_d if low_d > 0 else price)
+            # Pivot calculation
+            h_piv = high_d if high_d > 0 else price
+            l_piv = low_d  if low_d  > 0 else price
             p_piv = (h_piv + l_piv + price) / 3
-            r1, s1 = round(2 * p_piv - l_piv, 2), round(2 * p_piv - h_piv, 2)
-            r2, s2 = round(p_piv + (h_piv - l_piv), 2), round(p_piv - (h_piv - l_piv), 2)
-
-            best_buy = s1 if price > s1 else s2
+            r1 = round(2 * p_piv - l_piv, 2)
+            s1 = round(2 * p_piv - h_piv, 2)
+            r2 = round(p_piv + (h_piv - l_piv), 2)
+            s2 = round(p_piv - (h_piv - l_piv), 2)
+            best_buy  = s1 if price > s1 else s2
             best_sell = r1 if price < r1 else r2
 
-            # Trend Bias
-            is_buying = (price > vwap) and (macd > macd_sig) and (rsi > 50)
+            is_buying   = (price > vwap) and (macd > macd_sig) and (rsi > 50)
             trend_label = "BUYING" if is_buying else "SELLING"
 
-            # Minimum liquidity
             if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
                 continue
 
-            # ── INTRADAY ──────────────────────────────────────────────────────────
+            # ── INTRADAY ──────────────────────────────────────────────────────
             sc, rs, tgt, stp, grd, la = score_intraday(
                 price, change, rsi, macd, macd_sig, macd_h,
                 ema5, ema10, vwap, adx, stoch_k, stoch_d,
                 vol, avg_vol, atr, bb_low, bb_high, bb_basis,
-                open_p, high_d, low_d,
-                bullish, mkt_chg, hist, rsi_prev
+                open_p, high_d, low_d, bullish, mkt_chg, hist, rsi_prev,
+                rs_rank
             )
             if sc >= THRESH_INTRA and tgt > price > stp:
                 intra.append({
                     "Symbol": sym, "Sector": sector,
                     "Price": round(price, 2), "Bias": trend_label,
                     "Chg%": round(change, 2),
-                    "Score": sc, "Grade": grd,
-                    "Layers": f"{la}/7",
+                    "Score": sc, "Grade": grd, "Layers": f"{la}/9",
+                    "RS#": round(rs_rank, 0),
                     "Buy": best_buy, "Sell": best_sell,
                     "R1": r1, "S1": s1,
-                    "RV": round(rv, 1),
-                    "RSI": round(rsi, 0),
+                    "RV": round(rv, 1), "RSI": round(rsi, 0),
+                    "CMF": round(hist["cmf"], 2),
+                    "Regime": hist["regime"],
                     "Signals": " | ".join(rs[:4]),
                     "Target": tgt, "Stop": stp,
                     "R:R": _rr(price, tgt, stp),
+                    "RV_val": rv,   # for sorting
                 })
 
-            # ── SWING ─────────────────────────────────────────────────────────────
+            # ── SWING ─────────────────────────────────────────────────────────
             sc, rs, tgt, stp, grd, la = score_swing(
                 price, change, rsi, macd, macd_sig, macd_h,
                 ema5, ema10, ema20, ema50, vwap,
                 adx, atr, stoch_k, stoch_d,
                 bb_low, bb_high, bb_basis,
                 vol, avg_vol, chg1w, chg1m, low1m, high1m,
-                bullish, mkt_chg, rsi_prev, hist
+                bullish, mkt_chg, rsi_prev, hist, rs_rank
             )
             if sc >= THRESH_SWING and tgt > price > stp:
                 swing.append({
                     "Symbol": sym, "Sector": sector,
                     "Price": round(price, 2), "Bias": trend_label,
-                    "Chg%": round(change, 2),
-                    "Score": sc, "Grade": grd,
-                    "Layers": f"{la}/7",
+                    "Chg%": round(change, 2), "1W%": round(chg1w, 2),
+                    "Score": sc, "Grade": grd, "Layers": f"{la}/9",
+                    "RS#": round(rs_rank, 0),
                     "Buy": best_buy, "Sell": best_sell,
                     "R1": r1, "S1": s1,
-                    "1W%": round(chg1w, 2),
                     "RSI": round(rsi, 0),
-                    "Signals": " | ".join(rs[:3]),
+                    "CMF": round(hist["cmf"], 2),
+                    "52W%": round(hist["w52_pct"], 0),
+                    "Regime": hist["regime"],
+                    "Signals": " | ".join(rs[:4]),
                     "Target": tgt, "Stop": stp,
                     "R:R": _rr(price, tgt, stp),
                 })
 
-            # ── LONG-TERM ─────────────────────────────────────────────────────────
+            # ── LONG-TERM ─────────────────────────────────────────────────────
             perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0.0
             sc, rs, tgt, stp, grd, la = score_longterm(
                 price, rsi, macd, macd_sig, macd_h,
                 ema20, ema50, stoch_k, stoch_d,
                 bb_low, bb_high, bb_basis,
                 vol, avg_vol, chg1w, chg1m, low1m, high1m,
-                sector, rsi_prev, hist
+                sector, rsi_prev, hist, rs_rank
             )
             if sc >= THRESH_LONG and tgt > price > stp:
                 long_.append({
                     "Symbol": sym, "Sector": sector,
                     "Price": round(price, 2), "Bias": trend_label,
-                    "1W%": round(chg1w, 2),
-                    "Score": sc, "Grade": grd,
-                    "Layers": f"{la}/7",
+                    "1W%": round(chg1w, 2), "1M%": round(perf1m, 2),
+                    "Score": sc, "Grade": grd, "Layers": f"{la}/9",
+                    "RS#": round(rs_rank, 0),
                     "Buy": best_buy, "Sell": best_sell,
                     "R1": r1, "S1": s1,
-                    "1M%": round(perf1m, 2),
                     "Stab": round(hist["stability"], 1),
                     "RSI": round(rsi, 0),
-                    "Signals": " | ".join(rs[:3]),
+                    "CMF": round(hist["cmf"], 2),
+                    "52W%": round(hist["w52_pct"], 0),
+                    "Regime": hist["regime"],
+                    "Signals": " | ".join(rs[:4]),
                     "Target": tgt, "Stop": stp,
                     "R:R": _rr(price, tgt, stp),
                 })
 
-            # ── DIP SCANNER ───────────────────────────────────────────────────────
-            is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
-
-            # Improved dip condition: includes check against 7-day low
+            # ── DIP SCANNER ───────────────────────────────────────────────────
+            is_uptrend  = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
             near_7d_low = (low7d > 0 and (price / low7d - 1) * 100 < 5)
-            is_dipping = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02) or near_7d_low
+            is_dipping  = (rsi <= 45) or (stoch_k <= 30) or (price <= bb_low * 1.02) or near_7d_low
 
             if is_uptrend and is_dipping:
-                dip_stop, dip_eff_atr = _compute_atr_stop(price, atr, hist.get("atr_20", 0) if hist else 0, 1.0)
+                dip_stop, dip_eff_atr = _compute_atr_stop(
+                    price, atr, hist.get("atr_20", 0), 1.0
+                )
                 dip_target = round(price * (1 + _clamp((2.0 * dip_eff_atr / price) * 100, 3.0, 8.0) / 100), 2)
 
                 if dip_target > price > dip_stop:
-                    rsi_pts = max(0, min(40, (50 - rsi) * 2))
+                    rsi_pts  = max(0, min(35, (50 - rsi) * 2))
                     bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
-                    bb_pts = max(0, min(30, 30 * (1 - (price - bb_low) / bb_range)))
-                    vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
-                    stab_pts = min(15, hist.get("stability", 5) * 1.5) if hist else 7.5
+                    bb_pts   = max(0, min(25, 25 * (1 - (price - bb_low) / bb_range)))
+                    vol_pts  = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
+                    stab_pts = min(15, hist.get("stability", 5) * 1.5)
+                    # NEW: CMF bonus for quality dips
+                    flow_pts = max(0, min(10, hist["cmf"] * 30 + 5)) if hist["has_data"] else 5
 
-                    dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts)
+                    dip_score = round(rsi_pts + bb_pts + vol_pts + stab_pts + flow_pts)
 
                     dip_reasons = []
-                    if rsi <= 35: dip_reasons.append("Oversold RSI")
-                    elif rsi <= 45: dip_reasons.append("RSI Pullback")
-                    if stoch_k <= 25: dip_reasons.append("Stoch Oversold")
+                    if rsi <= 35:             dip_reasons.append("Oversold RSI")
+                    elif rsi <= 45:           dip_reasons.append("RSI Pullback")
+                    if stoch_k <= 25:         dip_reasons.append("Stoch Oversold")
                     if price <= bb_low * 1.015: dip_reasons.append("BB Support")
-                    if near_7d_low: dip_reasons.append("Near 7D Low")
+                    if near_7d_low:           dip_reasons.append("Near 7D Low")
+                    if hist["bull_divergence"]: dip_reasons.append("RSI Divergence")
+                    if hist["cmf"] > 0.05:    dip_reasons.append("CMF Positive")
                     if low1m > 0 and price <= low1m * 1.03: dip_reasons.append("Near 1M Low")
 
                     dips.append({
@@ -1311,313 +1511,294 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                         "Price": round(price, 2), "Bias": trend_label,
                         "Chg%": round(change, 2), "1W%": round(chg1w, 2),
                         "Score": dip_score,
+                        "RS#": round(rs_rank, 0),
                         "Target": dip_target, "Stop": dip_stop,
                         "R:R": _rr(price, dip_target, dip_stop),
-                        "Signals": " | ".join(dip_reasons[:3]) if dip_reasons else "Pullback",
+                        "Signals": " | ".join(dip_reasons[:4]) if dip_reasons else "Pullback",
                         "Buy": best_buy, "Sell": best_sell,
                         "RSI": round(rsi, 0),
-                        "R1": r1, "S1": s1
+                        "CMF": round(hist["cmf"], 2),
+                        "R1": r1, "S1": s1,
                     })
     finally:
         conn.close()
+
     srt = lambda lst: pd.DataFrame(lst).sort_values("Score", ascending=False).reset_index(drop=True) if lst else pd.DataFrame()
     return srt(intra), srt(swing), srt(long_), srt(dips)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
-# UI — DARK REPORT STYLE
+# SECTOR ROTATION ANALYTICS
 # ══════════════════════════════════════════════════════════════════════════════
 
+def compute_sector_rotation(db_path: str) -> Dict[str, Dict]:
+    """
+    Momentum-ranked sector rotation table:
+      • 1-month, 3-month return per sector (from DB)
+      • RS vs market
+      • Phase: Leading / Lagging / Recovering / Weakening
+    """
+    conn = sqlite3.connect(db_path)
+    result = {}
+    try:
+        for sector, info in SECTORS.items():
+            syms = info["symbols"]
+            rets_1m, rets_3m = [], []
+            for sym in syms:
+                try:
+                    df = pd.read_sql(
+                        "SELECT close FROM price_history WHERE symbol=? ORDER BY date DESC LIMIT 70",
+                        conn, params=(sym,)
+                    )
+                    if len(df) >= 20:
+                        c = df['close'].iloc[::-1]
+                        r1m = (c.iloc[-1] / c.iloc[max(0, len(c)-21)] - 1) * 100
+                        r3m = (c.iloc[-1] / c.iloc[0] - 1) * 100 if len(c) >= 63 else r1m
+                        rets_1m.append(r1m)
+                        rets_3m.append(r3m)
+                except Exception:
+                    continue
+            if rets_1m:
+                avg1m = float(np.mean(rets_1m))
+                avg3m = float(np.mean(rets_3m))
+                # Phase classification (Relative Rotation Graph concept)
+                if avg1m > 0 and avg3m > avg1m:
+                    phase = "Leading"
+                elif avg1m > 0 and avg3m < avg1m:
+                    phase = "Weakening"
+                elif avg1m < 0 and avg3m < 0:
+                    phase = "Lagging"
+                else:
+                    phase = "Recovering"
+                result[sector] = {
+                    "ret_1m": round(avg1m, 2),
+                    "ret_3m": round(avg3m, 2),
+                    "phase":  phase,
+                    "n":      len(rets_1m),
+                }
+    finally:
+        conn.close()
+    return result
 
 
-# ─── CSS: Dark Report ────────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# CSS — Wall Street Dark Terminal
+# ══════════════════════════════════════════════════════════════════════════════
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Libre+Baskerville:ital,wght@0,400;0,700;1,400&family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@400;500;600;700&display=swap');
 
-/* ── Base ─────────────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
 html, body, [class*="css"] {
-    background: #0a0e1a !important;
-    color: #e0e4ec !important;
+    background: #080c18 !important;
+    color: #dde2ec !important;
     font-family: 'Inter', -apple-system, sans-serif !important;
 }
 footer, #MainMenu { visibility: hidden; }
-
 .main .block-container {
-    max-width: 960px !important;
+    max-width: 1100px !important;
     padding: 2rem 2.5rem !important;
     margin: 0 auto !important;
 }
 
-/* ── Report Masthead ──────────────────────────────────────────────────────── */
-.report-masthead {
-    padding-bottom: 4px;
-    margin-bottom: 0px;
-}
+/* ── Masthead ── */
+.report-masthead { padding-bottom: 4px; margin-bottom: 0; }
 .report-title {
     font-family: 'Libre Baskerville', Georgia, serif;
-    font-size: 1.5rem;
-    font-weight: 700;
-    letter-spacing: 0.15em;
-    text-transform: uppercase;
-    color: #e0e4ec;
-    margin: 0;
-    line-height: 1.2;
+    font-size: 1.5rem; font-weight: 700;
+    letter-spacing: 0.15em; text-transform: uppercase;
+    color: #dde2ec; margin: 0; line-height: 1.2;
 }
 .report-subtitle {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
-    color: #6b7280;
-    margin-top: 4px;
-    letter-spacing: 0.05em;
+    font-size: 0.70rem; color: #5a6170; margin-top: 4px; letter-spacing: 0.05em;
 }
 
-/* ── Market Summary Bar ───────────────────────────────────────────────────── */
+/* ── Market Bar ── */
 .market-bar {
-    display: flex;
-    justify-content: space-between;
-    border: 1px solid #1e2536;
-    border-radius: 0;
-    padding: 10px 16px;
-    margin-bottom: 16px;
-    background: #0f1322;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.78rem;
+    display: flex; justify-content: space-between;
+    border: 1px solid #1a2030; padding: 10px 18px;
+    margin-bottom: 14px; background: #0c1020;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.78rem;
 }
 .market-item { text-align: center; }
 .market-label {
-    font-size: 0.62rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #6b7280;
-    margin-bottom: 2px;
+    font-size: 0.60rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    color: #5a6170; margin-bottom: 2px;
 }
-.market-value {
-    font-size: 0.92rem;
-    font-weight: 700;
-    color: #e0e4ec;
+.market-value { font-size: 0.92rem; font-weight: 700; color: #dde2ec; }
+
+/* ── Regime Badge ── */
+.regime-bull {
+    display: inline-block; padding: 1px 7px;
+    background: rgba(52,211,153,0.12); color: #34d399;
+    border: 1px solid rgba(52,211,153,0.3);
+    font-size: 0.62rem; font-weight: 700; letter-spacing: 0.08em;
+    font-family: 'JetBrains Mono', monospace; text-transform: uppercase;
+}
+.regime-bear {
+    display: inline-block; padding: 1px 7px;
+    background: rgba(248,113,113,0.12); color: #f87171;
+    border: 1px solid rgba(248,113,113,0.3);
+    font-size: 0.62rem; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; text-transform: uppercase;
+}
+.regime-neutral {
+    display: inline-block; padding: 1px 7px;
+    background: rgba(251,191,36,0.12); color: #fbbf24;
+    border: 1px solid rgba(251,191,36,0.3);
+    font-size: 0.62rem; font-weight: 700;
+    font-family: 'JetBrains Mono', monospace; text-transform: uppercase;
 }
 
-/* ── Sector Table ─────────────────────────────────────────────────────────── */
+/* ── Sector Row ── */
 .sector-row {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 0;
-    border: 1px solid #1e2536;
-    margin-bottom: 16px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.72rem;
+    display: flex; flex-wrap: wrap; gap: 0;
+    border: 1px solid #1a2030; margin-bottom: 14px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.72rem;
 }
 .sector-cell {
-    flex: 1 1 auto;
-    min-width: 90px;
-    padding: 4px 10px;
-    border-right: 1px solid #1e2536;
-    border-bottom: 1px solid #1e2536;
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    background: #0a0e1a;
+    flex: 1 1 auto; min-width: 88px; padding: 5px 10px;
+    border-right: 1px solid #1a2030; border-bottom: 1px solid #1a2030;
+    display: flex; flex-direction: column; background: #080c18;
 }
-.sector-cell:hover { background: #131828; }
-.sector-name { color: #6b7280; font-size: 0.68rem; }
-.sector-val { font-weight: 700; }
-.s-up { color: #34d399; }
-.s-dn { color: #f87171; }
-.s-nt { color: #fbbf24; }
+.sector-cell:hover { background: #0f1322; }
+.sector-name { color: #5a6170; font-size: 0.64rem; margin-bottom: 1px; }
+.sector-1m   { font-weight: 700; font-size: 0.74rem; }
+.sector-phase { font-size: 0.60rem; opacity: 0.7; }
+.s-up  { color: #34d399; } .s-dn { color: #f87171; } .s-nt { color: #fbbf24; }
+.s-lead { color: #34d399; } .s-weak { color: #fbbf24; }
+.s-lag  { color: #f87171; } .s-reco { color: #60a5fa; }
 
-/* ── Section Headers ──────────────────────────────────────────────────────── */
+/* ── Section Headers ── */
 .section-header {
     font-family: 'Libre Baskerville', Georgia, serif;
-    font-size: 1rem;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.12em;
-    border-bottom: 2px solid #3a4050;
-    padding-bottom: 4px;
-    margin-top: 24px;
-    margin-bottom: 4px;
-    color: #e0e4ec;
+    font-size: 0.95rem; font-weight: 700;
+    text-transform: uppercase; letter-spacing: 0.12em;
+    border-bottom: 2px solid #2a3040; padding-bottom: 4px;
+    margin-top: 26px; margin-bottom: 4px; color: #dde2ec;
 }
 .section-meta {
     font-family: 'JetBrains Mono', monospace;
-    font-size: 0.68rem;
-    color: #6b7280;
-    margin-bottom: 10px;
-    letter-spacing: 0.03em;
+    font-size: 0.66rem; color: #5a6170;
+    margin-bottom: 10px; letter-spacing: 0.03em;
 }
 
-/* ── Alert Boxes ──────────────────────────────────────────────────────────── */
+/* ── Alerts ── */
 .paper-alert {
     border: 1px solid rgba(248,113,113,0.3);
     border-left: 4px solid #f87171;
-    padding: 8px 14px;
-    margin-bottom: 12px;
-    font-size: 0.78rem;
-    color: #fca5a5;
-    background: rgba(239,68,68,0.08);
+    padding: 8px 14px; margin-bottom: 12px;
+    font-size: 0.76rem; color: #fca5a5;
+    background: rgba(239,68,68,0.06);
 }
 .paper-info {
-    border: 1px solid #1e2536;
-    border-left: 4px solid #3a4050;
-    padding: 8px 14px;
-    margin-bottom: 12px;
-    font-size: 0.78rem;
-    color: #9ca3af;
-    background: rgba(15,19,34,0.6);
+    border: 1px solid #1a2030; border-left: 4px solid #2a3040;
+    padding: 8px 14px; margin-bottom: 12px;
+    font-size: 0.76rem; color: #9ca3af;
+    background: rgba(12,16,32,0.6);
 }
 
-/* ── Data Tables ──────────────────────────────────────────────────────────── */
-[data-testid="stDataFrame"] {
-    background: transparent !important;
-    border-radius: 0 !important;
-    overflow: hidden;
-}
-[data-testid="stDataFrame"] > div {
-    border: 1px solid #1e2536 !important;
-}
+/* ── Tables ── */
+[data-testid="stDataFrame"] { background: transparent !important; border-radius: 0 !important; }
+[data-testid="stDataFrame"] > div { border: 1px solid #1a2030 !important; }
 thead tr th {
-    background: #0f1322 !important;
-    color: #6b7280 !important;
+    background: #0c1020 !important; color: #5a6170 !important;
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.64rem !important;
-    font-weight: 700 !important;
-    letter-spacing: 0.08em !important;
-    text-transform: uppercase;
-    padding: 8px 6px !important;
-    border-bottom: 2px solid #2a3040 !important;
+    font-size: 0.62rem !important; font-weight: 700 !important;
+    letter-spacing: 0.08em !important; text-transform: uppercase;
+    padding: 8px 6px !important; border-bottom: 2px solid #222840 !important;
 }
-tbody tr { border-bottom: 1px solid #1a1f2e !important; }
-tbody tr:nth-child(even) { background: rgba(15,19,34,0.4) !important; }
-tbody tr:hover { background: rgba(30,37,54,0.5) !important; }
+tbody tr { border-bottom: 1px solid #161c2e !important; }
+tbody tr:nth-child(even) { background: rgba(12,16,32,0.4) !important; }
+tbody tr:hover { background: rgba(26,32,48,0.5) !important; }
 tbody td {
     font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.72rem !important;
-    color: #e0e4ec !important;
-    padding: 6px !important;
+    font-size: 0.70rem !important; color: #dde2ec !important;
+    padding: 5px !important;
 }
 
-/* ── Buttons ──────────────────────────────────────────────────────────────── */
+/* ── Buttons ── */
 .stButton button {
-    background: #131828 !important;
-    border: 1px solid #2a3040 !important;
-    border-radius: 0 !important;
-    color: #e0e4ec !important;
-    padding: 4px 12px !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.72rem !important;
-    font-weight: 600 !important;
-    text-transform: uppercase !important;
-    letter-spacing: 0.08em !important;
-    min-height: unset !important;
-    line-height: 1.4 !important;
+    background: #0c1020 !important; border: 1px solid #222840 !important;
+    border-radius: 0 !important; color: #dde2ec !important;
+    padding: 4px 12px !important; font-family: 'JetBrains Mono', monospace !important;
+    font-size: 0.70rem !important; font-weight: 600 !important;
+    text-transform: uppercase !important; letter-spacing: 0.08em !important;
+    min-height: unset !important; line-height: 1.4 !important;
 }
-.stButton button:hover {
-    background: #1e2536 !important;
-    border-color: #3a4050 !important;
-}
+.stButton button:hover { background: #161c2e !important; border-color: #3a4050 !important; }
 
-/* ── Footer ───────────────────────────────────────────────────────────────── */
+/* ── Footer ── */
 .report-footer {
-    border-top: 1px solid #1e2536;
-    margin-top: 32px;
-    padding-top: 10px;
-    font-family: 'JetBrains Mono', monospace;
-    font-size: 0.62rem;
-    color: #4b5563;
-    line-height: 1.6;
+    border-top: 1px solid #1a2030; margin-top: 36px; padding-top: 10px;
+    font-family: 'JetBrains Mono', monospace; font-size: 0.60rem;
+    color: #3c4455; line-height: 1.7;
 }
 
-/* ── Mobile ───────────────────────────────────────────────────────────────── */
+/* ── Misc ── */
+hr { border-color: #1a2030 !important; margin: 1.2rem 0 !important; }
+div[data-testid="stExpander"] {
+    background: #0c1020 !important; border: 1px solid #1a2030 !important;
+    border-radius: 0 !important;
+}
 @media (max-width: 768px) {
-    .main .block-container {
-        padding: 1rem !important;
-    }
+    .main .block-container { padding: 1rem !important; }
     .report-title { font-size: 1.1rem; }
     .market-bar { flex-wrap: wrap; gap: 8px; }
-    [data-testid="stHorizontalBlock"] {
-        flex-wrap: wrap !important;
-    }
-    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(1) {
-        min-width: 100% !important;
-        flex: 1 1 100% !important;
-    }
-    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(2),
-    [data-testid="stHorizontalBlock"] > div[data-testid="column"]:nth-child(3) {
-        min-width: calc(50% - 8px) !important;
-        flex: 1 1 calc(50% - 8px) !important;
-    }
-}
-
-/* ── Misc overrides ───────────────────────────────────────────────────────── */
-hr { border-color: #1e2536 !important; margin: 1.2rem 0 !important; }
-.stTextInput>div>div>input, .stNumberInput>div>div>input {
-    background: #0f1322 !important;
-    border: 1px solid #2a3040 !important;
-    border-radius: 0 !important;
-    color: #e0e4ec !important;
-    font-family: 'JetBrains Mono', monospace !important;
-    font-size: 0.82rem !important;
-}
-div[data-testid="stExpander"] {
-    background: #0f1322 !important;
-    border: 1px solid #1e2536 !important;
-    border-radius: 0 !important;
 }
 </style>
 """, unsafe_allow_html=True)
 
-# ─── Init ────────────────────────────────────────────────────────────────────
-init_db()
+# ══════════════════════════════════════════════════════════════════════════════
+# INIT
+# ══════════════════════════════════════════════════════════════════════════════
 
-# ─── Market State ─────────────────────────────────────────────────────────────
-is_open = is_market_open()
-raw_data = fetch_live()
+init_db()
+is_open     = is_market_open()
+raw_data    = fetch_live()
 avg_chg, bullish, adv, dec, kse_fb = calculate_breadth_from_raw(raw_data)
-kse_api = fetch_kse_index()
+kse_api     = fetch_kse_index()
+now         = pkt_now()
 
 def _kse(key, fb):
-    val = kse_api.get(key) if kse_api else None
-    return val if val is not None else fb
+    return kse_api.get(key, fb) if kse_api else fb
 
 idx_close = _kse("close",         kse_fb["close"])
 idx_pct   = _kse("changePercent", kse_fb["change"])
 idx_vol   = _kse("volume",        kse_fb["volume"])
-
-now = pkt_now()
-vol_cr = idx_vol / 1e7
-state_text = "LIVE" if is_open else "CLOSED"
+vol_cr    = idx_vol / 1e7
+state_text  = "LIVE" if is_open else "CLOSED"
 breadth_text = "BULLISH" if bullish else ("BEARISH" if avg_chg < -0.5 else "NEUTRAL")
 
-# ─── Report Masthead & Action Buttons ────────────────────────────────────────
+# ── Masthead + Buttons ────────────────────────────────────────────────────────
 head_cols = st.columns([8, 1, 1])
-
 with head_cols[0]:
     st.markdown(f"""
     <div class="report-masthead">
         <div class="report-title">PSX Market Intelligence</div>
-        <div class="report-subtitle">KSE-100 Index &middot; 7-Layer Signal Engine &middot; {now.strftime("%A, %B %d, %Y")} &middot; {now.strftime("%H:%M")} PKT</div>
+        <div class="report-subtitle">
+            KSE-100 &middot; 9-Layer Signal Engine &middot; Wall Street Edition &middot;
+            {now.strftime("%A, %B %d, %Y")} &middot; {now.strftime("%H:%M")} PKT
+        </div>
     </div>
     """, unsafe_allow_html=True)
-
 with head_cols[1]:
-    st.markdown('<div style="padding-top: 8px;"></div>', unsafe_allow_html=True)
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
     scan_btn = st.button("SCAN", help="Run scanner now", use_container_width=True)
-
 with head_cols[2]:
-    st.markdown('<div style="padding-top: 8px;"></div>', unsafe_allow_html=True)
-    sync_btn = st.button("SYNC", help="Sync historical data", use_container_width=True)
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
+    sync_btn = st.button("SYNC", help="Sync 260-day history", use_container_width=True)
 
-# Double border separating the header from the rest of the report
-st.markdown('<div style="border-bottom: 3px double #3a4050; margin-bottom: 20px; margin-top: 8px;"></div>', unsafe_allow_html=True)
+st.markdown('<div style="border-bottom:3px double #2a3040;margin-bottom:18px;margin-top:8px"></div>', unsafe_allow_html=True)
 
 if sync_btn:
     sync_historical_data(KSE100)
     st.rerun()
 
-# ─── Market Summary ──────────────────────────────────────────────────────────
+# ── Market Summary Bar ────────────────────────────────────────────────────────
 pct_color = "#34d399" if idx_pct >= 0 else "#f87171"
 st.markdown(f"""
 <div class="market-bar">
@@ -1648,21 +1829,18 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ─── Breadth Warning ─────────────────────────────────────────────────────────
 if not bullish:
-    st.markdown(f'<div class="paper-alert"><strong>BEARISH BREADTH</strong> — Market declining ({adv} advancers vs {dec} decliners). Reduce position sizes. Intraday setups require extra confirmation.</div>', unsafe_allow_html=True)
+    st.markdown(
+        f'<div class="paper-alert"><strong>BEARISH BREADTH</strong> — '
+        f'Market declining ({adv} advancers vs {dec} decliners). '
+        f'Reduce size. Intraday setups need extra confirmation.</div>',
+        unsafe_allow_html=True
+    )
 
 scan = is_open or scan_btn
 
-# Initialize signal dataframes (populated inside scan block below)
-df_i = pd.DataFrame()
-df_s = pd.DataFrame()
-df_l = pd.DataFrame()
-df_d = pd.DataFrame()
-all_stocks_df = pd.DataFrame()
-
 if scan:
-    with st.spinner("Scanning KSE-100..."):
+    with st.spinner("Scanning KSE-100 (9-layer engine)…"):
         raw = fetch_live()
         save_snapshot(raw)
 
@@ -1670,7 +1848,8 @@ if scan:
         st.warning("No data returned — check network or try again.")
         st.stop()
 
-    # ── Sector Heatmap ────────────────────────────────────────────────────────
+    # ── Sector Heatmap with Rotation ─────────────────────────────────────────
+    rotation = compute_sector_rotation(CFG["DB_PATH"])
     sec_perf: Dict[str, list] = {}
     for item in raw:
         d = item.get("d", [])
@@ -1681,185 +1860,261 @@ if scan:
 
     tiles = ""
     for sec in SECTORS:
-        chgs = sec_perf.get(sec, [0])
-        avg  = sum(chgs) / len(chgs)
-        cls = "s-up" if avg >= 0.5 else ("s-dn" if avg < -0.5 else "s-nt")
-        arrow = "+" if avg >= 0 else ""
-        tiles += f'<div class="sector-cell"><span class="sector-name">{html.escape(sec)}</span><span class="sector-val {cls}">{arrow}{avg:.1f}%</span></div>'
-
+        chgs  = sec_perf.get(sec, [0])
+        avg_c = sum(chgs) / len(chgs)
+        cls   = "s-up" if avg_c >= 0.5 else ("s-dn" if avg_c < -0.5 else "s-nt")
+        arrow = "+" if avg_c >= 0 else ""
+        rot   = rotation.get(sec, {})
+        phase = rot.get("phase", "—")
+        phase_cls = {"Leading": "s-lead", "Weakening": "s-weak",
+                     "Lagging": "s-lag",  "Recovering": "s-reco"}.get(phase, "")
+        r3m_str = f"{rot.get('ret_3m', 0):+.1f}% 3M" if rot else ""
+        tiles += (
+            f'<div class="sector-cell">'
+            f'<span class="sector-name">{html.escape(sec)}</span>'
+            f'<span class="sector-1m {cls}">{arrow}{avg_c:.1f}%</span>'
+            f'<span class="sector-phase {phase_cls}">{phase} {r3m_str}</span>'
+            f'</div>'
+        )
     st.markdown(f'<div class="sector-row">{tiles}</div>', unsafe_allow_html=True)
 
-    # ── Run Signals ───────────────────────────────────────────────────────────
+    # ── Run Signal Engine ─────────────────────────────────────────────────────
     df_i, df_s, df_l, df_d = process_signals(raw, bullish, avg_chg)
     if not df_i.empty: df_i = df_i[df_i["Score"] >= THRESH_INTRA].reset_index(drop=True)
     if not df_s.empty: df_s = df_s[df_s["Score"] >= THRESH_SWING].reset_index(drop=True)
     if not df_l.empty: df_l = df_l[df_l["Score"] >= THRESH_LONG].reset_index(drop=True)
-    all_stocks_df = pd.concat([df_i, df_s, df_l, df_d]).drop_duplicates(subset=['Symbol']) if not (df_i.empty and df_s.empty and df_l.empty and df_d.empty) else pd.DataFrame()
     if not df_d.empty: df_d = df_d.reset_index(drop=True)
 
-    def render_table(df: pd.DataFrame, col_order: list, col_cfg: dict):
-        """Render a clean paper-style table with ordered columns."""
+    all_stocks_df = pd.concat(
+        [df for df in [df_i, df_s, df_l, df_d] if not df.empty]
+    ).drop_duplicates(subset=['Symbol']) if any(
+        not df.empty for df in [df_i, df_s, df_l, df_d]
+    ) else pd.DataFrame()
+
+    def render_table(df: pd.DataFrame, col_order: list, col_cfg: dict, top_n: int = 10):
         if df.empty:
             st.markdown('<div class="paper-info">No setups meet current threshold.</div>', unsafe_allow_html=True)
         else:
-            available_cols = [c for c in col_order if c in df.columns]
-            df_top = df.head(7)[available_cols].copy()
+            available = [c for c in col_order if c in df.columns]
             st.dataframe(
-                df_top,
+                df.head(top_n)[available].copy(),
                 column_config=col_cfg,
                 hide_index=True,
-                use_container_width=True
+                use_container_width=True,
             )
+
+    # ── TOP PICKS ─────────────────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Top Picks — All Timeframes</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-meta">Best-scoring setup per symbol across all scan categories</div>', unsafe_allow_html=True)
+
+    if not all_stocks_df.empty and "Score" in all_stocks_df.columns:
+        df_top = all_stocks_df.sort_values("Score", ascending=False).head(7)
+        top_cols = ["Symbol", "Price", "Score", "Grade", "Layers", "RS#", "Bias", "R:R", "Target", "Stop", "Signals"]
+        render_table(df_top, top_cols, {
+            "Symbol":  st.column_config.TextColumn("Symbol"),
+            "Price":   st.column_config.NumberColumn("Price",  format="%.2f"),
+            "Score":   st.column_config.NumberColumn("Score",  format="%d"),
+            "Grade":   st.column_config.TextColumn("Grade"),
+            "Layers":  st.column_config.TextColumn("Layers"),
+            "RS#":     st.column_config.NumberColumn("RS#",    format="%d",   help="O'Neil RS Rank 1-99"),
+            "Bias":    st.column_config.TextColumn("Bias"),
+            "R:R":     st.column_config.NumberColumn("R:R",    format="%.2f"),
+            "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop",   format="%.2f"),
+            "Signals": st.column_config.TextColumn("Signals"),
+        })
 
     # ── INTRADAY ──────────────────────────────────────────────────────────────
     n_i = len(df_i)
     st.markdown(f'<div class="section-header">Intraday Scalps</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="section-meta">{n_i} setups found &middot; Threshold: {THRESH_INTRA}/100 &middot; Breadth: {breadth_text} &middot; Min. 4/7 layer confluence</div>', unsafe_allow_html=True)
-
+    st.markdown(f'<div class="section-meta">{n_i} setups &middot; Threshold {THRESH_INTRA}/100 &middot; Breadth: {breadth_text} &middot; 4+/9 layer confluence required</div>', unsafe_allow_html=True)
     render_table(df_i,
-        ["Symbol", "Price", "Chg%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RV", "RSI", "R1", "S1"],
+        ["Symbol","Price","Chg%","Score","Grade","Layers","RS#","Bias","R:R","Target","Stop","RV","RSI","CMF","Regime","Signals","Buy","Sell","R1","S1"],
         {
             "Symbol":  st.column_config.TextColumn("Symbol"),
-            "Price":   st.column_config.NumberColumn("Price", format="%.2f"),
-            "Chg%":    st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-            "Score":   st.column_config.NumberColumn("Score", format="%d", help="Normalized 0-100 score"),
+            "Price":   st.column_config.NumberColumn("Price",  format="%.2f"),
+            "Chg%":    st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
+            "Score":   st.column_config.NumberColumn("Score",  format="%d"),
+            "Grade":   st.column_config.TextColumn("Grade"),
+            "Layers":  st.column_config.TextColumn("Layers"),
+            "RS#":     st.column_config.NumberColumn("RS#",    format="%d",    help="O'Neil RS Rank"),
             "Bias":    st.column_config.TextColumn("Bias"),
-            "R:R":     st.column_config.NumberColumn("R:R", format="%.2f"),
+            "R:R":     st.column_config.NumberColumn("R:R",    format="%.2f"),
             "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
-            "Stop":    st.column_config.NumberColumn("Stop", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop",   format="%.2f"),
+            "RV":      st.column_config.NumberColumn("RV",     format="%.1fx"),
+            "RSI":     st.column_config.NumberColumn("RSI",    format="%d"),
+            "CMF":     st.column_config.NumberColumn("CMF",    format="%.2f",  help="Chaikin Money Flow >0 = buying pressure"),
+            "Regime":  st.column_config.TextColumn("Regime",                   help="200d MA regime"),
             "Signals": st.column_config.TextColumn("Signals"),
-            "Buy":     st.column_config.NumberColumn("Buy", format="%.2f"),
-            "Sell":    st.column_config.NumberColumn("Sell", format="%.2f"),
-            "RV":      st.column_config.NumberColumn("RV", format="%.1fx"),
-            "RSI":     st.column_config.NumberColumn("RSI", format="%d"),
-            "R1":      st.column_config.NumberColumn("R1", format="%.2f"),
-            "S1":      st.column_config.NumberColumn("S1", format="%.2f"),
+            "Buy":     st.column_config.NumberColumn("Buy",    format="%.2f"),
+            "Sell":    st.column_config.NumberColumn("Sell",   format="%.2f"),
+            "R1":      st.column_config.NumberColumn("R1",     format="%.2f"),
+            "S1":      st.column_config.NumberColumn("S1",     format="%.2f"),
         }
     )
 
     # ── SWING ─────────────────────────────────────────────────────────────────
     n_s = len(df_s)
     st.markdown(f'<div class="section-header">Swing Trades</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="section-meta">{n_s} setups found &middot; Threshold: {THRESH_SWING}/100 &middot; Breadth: {breadth_text} &middot; Min. 4/7 layer confluence</div>', unsafe_allow_html=True)
-
+    st.markdown(f'<div class="section-meta">{n_s} setups &middot; Threshold {THRESH_SWING}/100 &middot; 4+/9 layer confluence required</div>', unsafe_allow_html=True)
     render_table(df_s,
-        ["Symbol", "Price", "Chg%", "1W%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RSI", "R1", "S1"],
+        ["Symbol","Price","Chg%","1W%","Score","Grade","Layers","RS#","52W%","Bias","R:R","Target","Stop","RSI","CMF","Regime","Signals","Buy","Sell","R1","S1"],
         {
             "Symbol":  st.column_config.TextColumn("Symbol"),
-            "Price":   st.column_config.NumberColumn("Price", format="%.2f"),
-            "Chg%":    st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-            "1W%":     st.column_config.NumberColumn("1W%", format="%.2f%%"),
-            "Score":   st.column_config.NumberColumn("Score", format="%d"),
+            "Price":   st.column_config.NumberColumn("Price",  format="%.2f"),
+            "Chg%":    st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
+            "1W%":     st.column_config.NumberColumn("1W%",    format="%.2f%%"),
+            "Score":   st.column_config.NumberColumn("Score",  format="%d"),
+            "Grade":   st.column_config.TextColumn("Grade"),
+            "Layers":  st.column_config.TextColumn("Layers"),
+            "RS#":     st.column_config.NumberColumn("RS#",    format="%d"),
+            "52W%":    st.column_config.NumberColumn("52W%",   format="%d%%",  help="52-week price percentile"),
             "Bias":    st.column_config.TextColumn("Bias"),
-            "R:R":     st.column_config.NumberColumn("R:R", format="%.2f"),
+            "R:R":     st.column_config.NumberColumn("R:R",    format="%.2f"),
             "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
-            "Stop":    st.column_config.NumberColumn("Stop", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop",   format="%.2f"),
+            "RSI":     st.column_config.NumberColumn("RSI",    format="%d"),
+            "CMF":     st.column_config.NumberColumn("CMF",    format="%.2f"),
+            "Regime":  st.column_config.TextColumn("Regime"),
             "Signals": st.column_config.TextColumn("Signals"),
-            "Buy":     st.column_config.NumberColumn("Buy", format="%.2f"),
-            "Sell":    st.column_config.NumberColumn("Sell", format="%.2f"),
-            "RSI":     st.column_config.NumberColumn("RSI", format="%d"),
-            "R1":      st.column_config.NumberColumn("R1", format="%.2f"),
-            "S1":      st.column_config.NumberColumn("S1", format="%.2f"),
+            "Buy":     st.column_config.NumberColumn("Buy",    format="%.2f"),
+            "Sell":    st.column_config.NumberColumn("Sell",   format="%.2f"),
+            "R1":      st.column_config.NumberColumn("R1",     format="%.2f"),
+            "S1":      st.column_config.NumberColumn("S1",     format="%.2f"),
         }
     )
 
     # ── LONG-TERM ─────────────────────────────────────────────────────────────
     n_l = len(df_l)
     st.markdown(f'<div class="section-header">Long-Term Investments</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="section-meta">{n_l} setups found &middot; Threshold: {THRESH_LONG}/100 &middot; Min. 4/7 layer confluence</div>', unsafe_allow_html=True)
-
+    st.markdown(f'<div class="section-meta">{n_l} setups &middot; Threshold {THRESH_LONG}/100 &middot; Sector quality ≥6 required</div>', unsafe_allow_html=True)
     render_table(df_l,
-        ["Symbol", "Price", "1M%", "1W%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RSI", "R1", "S1"],
+        ["Symbol","Price","1M%","1W%","Score","Grade","Layers","RS#","52W%","Stab","Bias","R:R","Target","Stop","RSI","CMF","Regime","Signals","Buy","Sell","R1","S1"],
         {
             "Symbol":  st.column_config.TextColumn("Symbol"),
-            "Price":   st.column_config.NumberColumn("Price", format="%.2f"),
-            "1M%":     st.column_config.NumberColumn("1M%", format="%.2f%%"),
-            "1W%":     st.column_config.NumberColumn("1W%", format="%.2f%%"),
-            "Score":   st.column_config.NumberColumn("Score", format="%d"),
+            "Price":   st.column_config.NumberColumn("Price",  format="%.2f"),
+            "1M%":     st.column_config.NumberColumn("1M%",    format="%.2f%%"),
+            "1W%":     st.column_config.NumberColumn("1W%",    format="%.2f%%"),
+            "Score":   st.column_config.NumberColumn("Score",  format="%d"),
+            "Grade":   st.column_config.TextColumn("Grade"),
+            "Layers":  st.column_config.TextColumn("Layers"),
+            "RS#":     st.column_config.NumberColumn("RS#",    format="%d"),
+            "52W%":    st.column_config.NumberColumn("52W%",   format="%d%%"),
+            "Stab":    st.column_config.NumberColumn("Stab",   format="%.1f",  help="Price stability score 0-10"),
             "Bias":    st.column_config.TextColumn("Bias"),
-            "R:R":     st.column_config.NumberColumn("R:R", format="%.2f"),
+            "R:R":     st.column_config.NumberColumn("R:R",    format="%.2f"),
             "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
-            "Stop":    st.column_config.NumberColumn("Stop", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop",   format="%.2f"),
+            "RSI":     st.column_config.NumberColumn("RSI",    format="%d"),
+            "CMF":     st.column_config.NumberColumn("CMF",    format="%.2f"),
+            "Regime":  st.column_config.TextColumn("Regime"),
             "Signals": st.column_config.TextColumn("Signals"),
-            "Buy":     st.column_config.NumberColumn("Buy", format="%.2f"),
-            "Sell":    st.column_config.NumberColumn("Sell", format="%.2f"),
-            "RSI":     st.column_config.NumberColumn("RSI", format="%d"),
-            "R1":      st.column_config.NumberColumn("R1", format="%.2f"),
-            "S1":      st.column_config.NumberColumn("S1", format="%.2f"),
+            "Buy":     st.column_config.NumberColumn("Buy",    format="%.2f"),
+            "Sell":    st.column_config.NumberColumn("Sell",   format="%.2f"),
+            "R1":      st.column_config.NumberColumn("R1",     format="%.2f"),
+            "S1":      st.column_config.NumberColumn("S1",     format="%.2f"),
         }
     )
 
     # ── STOCKS ON DIP ─────────────────────────────────────────────────────────
     n_d = len(df_d)
     st.markdown(f'<div class="section-header">Stocks on Dip</div>', unsafe_allow_html=True)
-    st.markdown(f'<div class="section-meta">{n_d} setups found &middot; Filter: Price > EMA50 (Uptrend) &middot; Pullback</div>', unsafe_allow_html=True)
-
+    st.markdown(f'<div class="section-meta">{n_d} setups &middot; Uptrend (above EMA50) + Pullback detected &middot; CMF-enhanced quality scoring</div>', unsafe_allow_html=True)
     render_table(df_d,
-        ["Symbol", "Price", "Chg%", "1W%", "Score", "Bias", "R:R", "Target", "Stop", "Signals", "Buy", "Sell", "RSI", "R1", "S1"],
+        ["Symbol","Price","Chg%","1W%","Score","RS#","Bias","R:R","Target","Stop","RSI","CMF","Signals","Buy","Sell","R1","S1"],
         {
             "Symbol":  st.column_config.TextColumn("Symbol"),
-            "Price":   st.column_config.NumberColumn("Price", format="%.2f"),
-            "Chg%":    st.column_config.NumberColumn("Chg%", format="%.2f%%"),
-            "1W%":     st.column_config.NumberColumn("1W%", format="%.2f%%"),
-            "Score":   st.column_config.NumberColumn("Score", format="%d", help="Dip Score (higher = better quality dip)"),
+            "Price":   st.column_config.NumberColumn("Price",  format="%.2f"),
+            "Chg%":    st.column_config.NumberColumn("Chg%",   format="%.2f%%"),
+            "1W%":     st.column_config.NumberColumn("1W%",    format="%.2f%%"),
+            "Score":   st.column_config.NumberColumn("Score",  format="%d",    help="Dip quality score"),
+            "RS#":     st.column_config.NumberColumn("RS#",    format="%d"),
             "Bias":    st.column_config.TextColumn("Bias"),
-            "R:R":     st.column_config.NumberColumn("R:R", format="%.2f"),
+            "R:R":     st.column_config.NumberColumn("R:R",    format="%.2f"),
             "Target":  st.column_config.NumberColumn("Target", format="%.2f"),
-            "Stop":    st.column_config.NumberColumn("Stop", format="%.2f"),
+            "Stop":    st.column_config.NumberColumn("Stop",   format="%.2f"),
+            "RSI":     st.column_config.NumberColumn("RSI",    format="%d"),
+            "CMF":     st.column_config.NumberColumn("CMF",    format="%.2f"),
             "Signals": st.column_config.TextColumn("Signals"),
-            "Buy":     st.column_config.NumberColumn("Buy", format="%.2f"),
-            "Sell":    st.column_config.NumberColumn("Sell", format="%.2f"),
-            "RSI":     st.column_config.NumberColumn("RSI", format="%d"),
-            "R1":      st.column_config.NumberColumn("R1", format="%.2f"),
-            "S1":      st.column_config.NumberColumn("S1", format="%.2f"),
+            "Buy":     st.column_config.NumberColumn("Buy",    format="%.2f"),
+            "Sell":    st.column_config.NumberColumn("Sell",   format="%.2f"),
+            "R1":      st.column_config.NumberColumn("R1",     format="%.2f"),
+            "S1":      st.column_config.NumberColumn("S1",     format="%.2f"),
         }
     )
 
     # ── TREND REVERSALS ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Trend Reversals</div>', unsafe_allow_html=True)
-    st.markdown('<div class="section-meta">Changes detected since yesterday</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-meta">Bias changes detected since previous session snapshot</div>', unsafe_allow_html=True)
 
-    # Get yesterday's data for comparison
     yesterday_snapshot = get_yesterday_snapshot()
-
     reversals = []
     if not all_stocks_df.empty:
         for _, row in all_stocks_df.iterrows():
-            symbol = row['Symbol']
-            current_trend = row['Bias']
-            current_rv = row.get('RV', 'N/A')
-
+            symbol       = row['Symbol']
+            current_trend= row['Bias']
+            current_rs   = row.get('RS#', 'N/A')
             yesterday_data = yesterday_snapshot.get(symbol)
-            if yesterday_data:
-                prev_trend = yesterday_data['trend']
-                prev_rv = yesterday_data.get('rv', 'N/A')
-                if prev_trend != current_trend:
-                    reversals.append({
-                        "Symbol": symbol,
-                        "Yesterday Trend": prev_trend,
-                        "Today Trend": current_trend,
-                        "Yesterday RV": round(prev_rv, 1) if isinstance(prev_rv, float) else 'N/A',
-                        "Today RV": current_rv,
-                    })
-        # Save today's data for the next day's comparison
+            if yesterday_data and yesterday_data['trend'] != current_trend:
+                reversals.append({
+                    "Symbol":         symbol,
+                    "Yesterday Bias": yesterday_data['trend'],
+                    "Today Bias":     current_trend,
+                    "RS#":            round(yesterday_data.get('rs_rank', 50)),
+                    "Today RS#":      current_rs,
+                })
         save_daily_snapshot(all_stocks_df)
 
     if reversals:
-        reversals_df = pd.DataFrame(reversals)
-        st.dataframe(reversals_df, hide_index=True, use_container_width=True)
+        st.dataframe(pd.DataFrame(reversals), hide_index=True, use_container_width=True)
     else:
         st.markdown('<div class="paper-info">No trend reversals detected in this scan.</div>', unsafe_allow_html=True)
 
-# ── Report Footer ─────────────────────────────────────────────────────────────
+    # ── SECTOR ROTATION TABLE ─────────────────────────────────────────────────
+    st.markdown('<div class="section-header">Sector Rotation Monitor</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-meta">1M and 3M momentum with Relative Rotation phase (Leading → Weakening → Lagging → Recovering)</div>', unsafe_allow_html=True)
+
+    if rotation:
+        rot_rows = []
+        for sec, data in sorted(rotation.items(), key=lambda x: x[1]["ret_1m"], reverse=True):
+            rot_rows.append({
+                "Sector": sec,
+                "1M Ret%": data["ret_1m"],
+                "3M Ret%": data["ret_3m"],
+                "Phase": data["phase"],
+                "Symbols": data["n"],
+            })
+        rot_df = pd.DataFrame(rot_rows)
+        st.dataframe(
+            rot_df,
+            column_config={
+                "Sector":  st.column_config.TextColumn("Sector"),
+                "1M Ret%": st.column_config.NumberColumn("1M Ret%", format="%.2f%%"),
+                "3M Ret%": st.column_config.NumberColumn("3M Ret%", format="%.2f%%"),
+                "Phase":   st.column_config.TextColumn("Phase"),
+                "Symbols": st.column_config.NumberColumn("Symbols", format="%d"),
+            },
+            hide_index=True,
+            use_container_width=True,
+        )
+    else:
+        st.markdown('<div class="paper-info">Sync historical data to enable sector rotation analysis.</div>', unsafe_allow_html=True)
+
+# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="report-footer">
-    Generated {now.strftime("%Y-%m-%d %H:%M:%S")} PKT &middot; Source: TradingView Scanner API, Sarmaaya &middot; KSE-100 Universe ({len(KSE100)} symbols)<br>
-    Scores normalized 0-100 with 7-layer budgets. Grade: A (>=75, 6+ layers) / B (>=60, 5+) / C (>=45, 4+) / D (below).<br>
-    This is a quantitative screening tool, not investment advice. All signals require independent verification before execution.
+    Generated {now.strftime("%Y-%m-%d %H:%M:%S")} PKT
+    &middot; Source: TradingView Scanner, Sarmaaya
+    &middot; KSE-100 Universe ({len(KSE100)} symbols)<br>
+    9-Layer scoring (Trend · Momentum+RS · Volume · Pattern+MeanRev · Breadth · Volatility · History200d · InstFlow(OBV+CMF) · Regime).
+    Grade: A+ (≥78,7+) / A (≥72,6+) / B+ (≥62,5+) / B (≥55,5+) / C (≥45,4+) / D.<br>
+    New: Volume Profile (POC/VAH/VAL) · RSI Divergence · Z-Score · 52-Week %ile · RS Rank · Sector Rotation Phases.<br>
+    Quantitative screening tool only. Not investment advice. Signals require independent verification before execution.
 </div>
 """, unsafe_allow_html=True)
 
-# ── Auto-refresh (non-blocking) ──────────────────────────────────────────────
+# ── Auto-refresh ──────────────────────────────────────────────────────────────
 if is_open:
     import streamlit.components.v1 as components
     components.html(
