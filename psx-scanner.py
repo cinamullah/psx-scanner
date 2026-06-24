@@ -38,7 +38,7 @@ CFG = {
     "INST_VOL_X": 2.5,
     "BREADTH_MIN": 0.0,
     "DB_PATH": os.path.join(BASE_DIR, "psx_elite.db"),
-    "HIST_DAYS": 90,
+    "HIST_DAYS": 365,
     "REGIME_PERIOD": 50,  # MA period for market regime detection (was 200)
 }
 
@@ -1513,14 +1513,10 @@ def score_longterm(
     L1 = {9: 10, 8: 8, 7: 6}.get(quality, 3)
     if hist["ema200"] > 0 and price > hist["ema200"]:
         L1 += 5
-        reasons.append("Above MA200")
+        reasons.append("Above EMA200")
     if price > ema50: # Using 50-day MA for trend health
         L1 += 5
         reasons.append("Above EMA50")
-    # Removed EMA20 check to focus on longer-term indicators
-    if hist["ema200"] > 0 and price > hist["ema200"]:
-        L1 += 3
-        reasons.append("Above MA200")
     if hist["regime"] == "BULL":
         L1 += 2
     elif hist["regime"] == "BEAR":
