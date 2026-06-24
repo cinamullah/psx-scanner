@@ -39,7 +39,7 @@ CFG = {
     "BREADTH_MIN": 0.0,
     "DB_PATH": os.path.join(BASE_DIR, "psx_elite.db"),
     "HIST_DAYS": 90,
-    "REGIME_PERIOD": 60,  # MA period for market regime detection (was 200)
+    "REGIME_PERIOD": 50,  # MA period for market regime detection (was 200)
 }
 
 # ── 9-Layer Budgets (total = 100) ─────────────────────────────────────────────
@@ -1243,7 +1243,7 @@ def score_swing(
     if price < CFG["MIN_PRICE"]:
         return 0, [], 0, 0, "D", 0
     if vol < CFG["MIN_VOLUME"] * 0.8:
-        return 0, [], 0, 0, "D", 0
+        return 0, [], 0, 0, "D", 0 # No change here, just for context
     if price < ema50 * 0.985:
         return 0, [], 0, 0, "D", 0
     if adx < 12:
@@ -1251,13 +1251,13 @@ def score_swing(
 
     # ── L1: Multi-TF Trend (18) ──────────────────────────────────────────────
     L1 = 0
-    if ema5 > 0 and price > ema5 > ema10 > ema20 > ema50:
+    if ema5 > 0 and price > ema20 > ema50:
         L1 += 14
-        reasons.append("Full EMA Fan")
-    elif price > ema10 > ema20 > ema50:
+        reasons.append("EMA Trend (20/50)")
+    elif price > ema20 and price > ema50:
         L1 += 10
-        reasons.append("EMA Fan")
-    elif price > ema20 > ema50:
+        reasons.append("Above EMAs (20/50)")
+    elif price > ema50:
         L1 += 5
     if hist["higher_lows"]:
         L1 += 4
@@ -1299,7 +1299,7 @@ def score_swing(
     if macd > macd_sig and macd_hist > 0:
         L2 += 5
         reasons.append("MACD Bullish")
-    elif macd < macd_sig and macd_hist < 0:
+    elif macd < macd_sig:
         L2 -= 4
     if stoch_k > stoch_d and stoch_k < 80:
         L2 += 3
@@ -1511,14 +1511,13 @@ def score_longterm(
 
     # ── L1: Sector Quality + Trend (18) ──────────────────────────────────────
     L1 = {9: 10, 8: 8, 7: 6}.get(quality, 3)
-    if price > ema50:
+    if hist["ema200"] > 0 and price > hist["ema200"]:
+        L1 += 5
+        reasons.append("Above MA200")
+    if price > ema50: # Using 50-day MA for trend health
         L1 += 5
         reasons.append("Above EMA50")
-    elif price > ema50 * 0.97:
-        L1 += 2
-    if price > ema20:
-        L1 += 3
-        reasons.append("Above EMA20")
+    # Removed EMA20 check to focus on longer-term indicators
     if hist["ema200"] > 0 and price > hist["ema200"]:
         L1 += 3
         reasons.append("Above MA200")
