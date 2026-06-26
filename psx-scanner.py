@@ -170,6 +170,7 @@ TV_COLS = [
     "BB.upper",
     "EMA20",
     "EMA50",
+    "EMA25",
     "change|1W",
     "High.1M",
     "Low.1M",
@@ -1216,6 +1217,7 @@ def score_swing(
     ema5,
     ema10,
     ema20,
+    ema25,
     ema50,
     vwap,
     adx,
@@ -1264,6 +1266,9 @@ def score_swing(
         reasons.append("Higher Lows")
     if adx >= 30:
         L1 += 4
+        reasons.append(f"ADX {adx:.0f} Strong")
+    elif adx >= 25:
+        L1 += 2
         reasons.append(f"ADX {adx:.0f}")
     # 200-day anchoring
     if hist["ema200"] > 0 and price > hist["ema200"]:
@@ -1273,6 +1278,9 @@ def score_swing(
         L1 += 2
     elif hist["regime"] == "BEAR":
         L1 -= 3
+    if ema25 > 0 and price > ema25 > ema50:
+        L1 += 5
+        reasons.append("Price > EMA25 > EMA50")
     L1 = _clamp(L1, 0, LAYER_BUDGET["trend"])
     if L1 > 0:
         layers_active += 1
@@ -1299,6 +1307,9 @@ def score_swing(
     if macd > macd_sig and macd_hist > 0:
         L2 += 5
         reasons.append("MACD Bullish")
+        if macd > 0:
+            L2 += 2
+            reasons.append("MACD > 0")
     elif macd < macd_sig:
         L2 -= 4
     if stoch_k > stoch_d and stoch_k < 80:
@@ -1338,6 +1349,11 @@ def score_swing(
 
     # ── L4: Price Pattern + Mean Reversion (12) ──────────────────────────────
     L4 = 0
+    bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
+    if bb_pos < 0.2 and change > 0:
+        L4 += 5
+        reasons.append("BB Bounce")
+
     if high1m > low1m > 0:
         range1m = high1m - low1m
         pos1m = (price - low1m) / range1m
@@ -1443,6 +1459,9 @@ def score_swing(
     if hist["cmf"] > 0.1:
         L8 += 5
         reasons.append(f"CMF {hist['cmf']:.2f}")
+    elif hist["cmf"] > 0:
+        L8 += 2
+        reasons.append(f"CMF Positive")
     elif hist["cmf"] < -0.15:
         L8 -= 3
     L8 = _clamp(L8, -4, LAYER_BUDGET["flow"])
@@ -1734,7 +1753,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
     try:
         for item in raw:
             d = item.get("d", [])
-            if len(d) < 27 or not d[0]:
+            if len(d) < 28 or not d[0]:
                 continue
 
             sym = d[0]
@@ -1749,30 +1768,31 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             bb_low = safe(d[9])
             bb_high = safe(d[10])
             ema20 = safe(d[11])
-            ema50 = safe(d[12])
-            chg1w = safe(d[13])
-            high1m = safe(d[14])
-            low1m = safe(d[15])
-            vwap = safe(d[16]) or price
-            ema10 = safe(d[17])
-            adx = safe(d[18])
-            atr = safe(d[19])
-            stoch_k = safe(d[20], 50)
-            stoch_d = safe(d[21], 50)
-            open_p = safe(d[22])
-            high_d = safe(d[23])
-            low_d = safe(d[24])
-            ema5 = safe(d[25])
-            chg1m = safe(d[26])
-            rsi_prev = safe(d[27], rsi) if len(d) > 27 else rsi
-            low7d = safe(d[28]) if len(d) > 28 else low_d
-            macd_h = safe(d[29]) if len(d) > 29 else (macd - macd_sig)
-            bb_basis = safe(d[31]) if len(d) > 31 else (bb_low + bb_high) / 2
+            ema25 = safe(d[12])
+            ema50 = safe(d[13])
+            chg1w = safe(d[14])
+            high1m = safe(d[15])
+            low1m = safe(d[16])
+            vwap = safe(d[17]) or price
+            ema10 = safe(d[18])
+            adx = safe(d[19])
+            atr = safe(d[20])
+            stoch_k = safe(d[21], 50)
+            stoch_d = safe(d[22], 50)
+            open_p = safe(d[23])
+            high_d = safe(d[24])
+            low_d = safe(d[25])
+            ema5 = safe(d[26])
+            chg1m = safe(d[27])
+            rsi_prev = safe(d[28], rsi) if len(d) > 28 else rsi
+            low7d = safe(d[29]) if len(d) > 29 else low_d
+            macd_h = safe(d[30]) if len(d) > 30 else (macd - macd_sig)
+            bb_basis = safe(d[32]) if len(d) > 32 else (bb_low + bb_high) / 2
             # New extended fields
-            high3m = safe(d[33]) if len(d) > 33 else high1m
-            low3m = safe(d[34]) if len(d) > 34 else low1m
-            high6m = safe(d[35]) if len(d) > 35 else high3m
-            low6m = safe(d[36]) if len(d) > 36 else low3m
+            high3m = safe(d[34]) if len(d) > 34 else high1m
+            low3m = safe(d[35]) if len(d) > 35 else low1m
+            high6m = safe(d[36]) if len(d) > 36 else high3m
+            low6m = safe(d[37]) if len(d) > 37 else low3m
 
             if price <= 0 or avg_vol <= 0:
                 continue
@@ -1859,6 +1879,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 ema5,
                 ema10,
                 ema20,
+                ema25,
                 ema50,
                 vwap,
                 adx,
