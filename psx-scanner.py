@@ -447,6 +447,79 @@ def _calc_cmf(high, low, close, volume, period=20) -> float:
     return float(cmf.iloc[-1]) if not cmf.empty else 0.0
 
 
+def _calc_adx(high, low, close, period=14) -> Tuple[pd.Series, pd.Series, pd.Series]:
+    """
+    Wilder's ADX with +DI/-DI.
+    ADX alone only measures trend *strength*, not direction — a stock can have
+    ADX 40 while grinding lower. We keep +DI/-DI so callers can confirm the
+    strong trend is actually bullish before rewarding it.
+    """
+    up_move = high.diff()
+    down_move = -low.diff()
+    plus_dm = pd.Series(np.where((up_move > down_move) & (up_move > 0), up_move, 0.0), index=high.index)
+    minus_dm = pd.Series(np.where((down_move > up_move) & (down_move > 0), down_move, 0.0), index=high.index)
+    tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+    atr_w = tr.ewm(alpha=1 / period, adjust=False).mean()
+    plus_di = 100 * (plus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr_w + 1e-9))
+    minus_di = 100 * (minus_dm.ewm(alpha=1 / period, adjust=False).mean() / (atr_w + 1e-9))
+    dx = 100 * (plus_di - minus_di).abs() / (plus_di + minus_di + 1e-9)
+    adx = dx.ewm(alpha=1 / period, adjust=False).mean()
+    return adx, plus_di, minus_di
+
+
+def _calc_psar(high, low, close, af_step=0.02, af_max=0.2) -> Tuple[pd.Series, pd.Series]:
+    """
+    Parabolic SAR (Wilder). Returns (sar_series, bullish_series).
+    Used two ways downstream: (1) as a trend/flip timing signal, and
+    (2) as a trailing-stop level — it hugs price more tightly than a flat
+    ATR multiple once a trend is established, which is the whole point of
+    using it for swing/long-term stop placement.
+    """
+    n = len(close)
+    idx = close.index
+    if n < 5:
+        return pd.Series(close.values, index=idx), pd.Series([True] * n, index=idx)
+
+    h, l = high.values, low.values
+    sar = np.zeros(n)
+    bullish = np.zeros(n, dtype=bool)
+
+    is_bull = close.iloc[1] >= close.iloc[0]
+    sar[0] = l[0] if is_bull else h[0]
+    ep = h[0] if is_bull else l[0]
+    af = af_step
+    bullish[0] = is_bull
+
+    for i in range(1, n):
+        prev_sar = sar[i - 1]
+        if is_bull:
+            cur_sar = prev_sar + af * (ep - prev_sar)
+            cur_sar = min(cur_sar, l[i - 1], l[i - 2] if i >= 2 else l[i - 1])
+            if l[i] < cur_sar:
+                is_bull = False
+                cur_sar = ep
+                ep = l[i]
+                af = af_step
+            elif h[i] > ep:
+                ep = h[i]
+                af = min(af + af_step, af_max)
+        else:
+            cur_sar = prev_sar + af * (ep - prev_sar)
+            cur_sar = max(cur_sar, h[i - 1], h[i - 2] if i >= 2 else h[i - 1])
+            if h[i] > cur_sar:
+                is_bull = True
+                cur_sar = ep
+                ep = h[i]
+                af = af_step
+            elif l[i] < ep:
+                ep = l[i]
+                af = min(af + af_step, af_max)
+        sar[i] = cur_sar
+        bullish[i] = is_bull
+
+    return pd.Series(sar, index=idx), pd.Series(bullish, index=idx)
+
+
 def _calc_vwap_bands(high, low, close, volume) -> Tuple[float, float, float]:
     """Rolling VWAP with ±1σ bands over last 20 sessions."""
     tp = (high + low + close) / 3
@@ -589,6 +662,15 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         "hist_pct": 50.0,
         "ema200": 0.0,
         "return_3m": 0.0,
+        # ADX / PSAR
+        "adx_hist": 0.0,
+        "adx_rising": False,
+        "di_bullish": True,
+        "psar": 0.0,
+        "psar_bullish": True,
+        "psar_flip_recent": False,
+        "psar_bars_since_flip": 99,
+        "psar_dist_pct": 0.0,
     }
 
     if len(df) < 20:
@@ -752,6 +834,42 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         (float(c.iloc[-1]) - hist_lo) / (hist_hi - hist_lo + 1e-9) * 100 if hist_hi > hist_lo else 50.0
     )
 
+    # ── NEW 21. ADX / +DI / -DI (self-computed, direction-aware) ─────────────
+    adx_hist = 0.0
+    adx_rising = False
+    di_bullish = True
+    if n >= 20:
+        adx_series, plus_di, minus_di = _calc_adx(h, l, c)
+        if not adx_series.empty and not pd.isna(adx_series.iloc[-1]):
+            adx_hist = float(adx_series.iloc[-1])
+            if len(adx_series) >= 6 and not pd.isna(adx_series.iloc[-6]):
+                adx_rising = adx_hist - float(adx_series.iloc[-6]) > 1.5
+            di_bullish = bool(plus_di.iloc[-1] >= minus_di.iloc[-1])
+
+    # ── NEW 22. Parabolic SAR (trend flip + trailing-stop level) ─────────────
+    psar_val = 0.0
+    psar_bullish = True
+    psar_flip_recent = False
+    psar_bars_since_flip = 99
+    psar_dist_pct = 0.0
+    if n >= 10:
+        psar_series, psar_trend = _calc_psar(h, l, c)
+        psar_val = float(psar_series.iloc[-1])
+        psar_bullish = bool(psar_trend.iloc[-1])
+        flips = psar_trend.tail(min(30, n))
+        cur = flips.iloc[-1]
+        cnt = 0
+        for val in reversed(flips.values):
+            if val == cur:
+                cnt += 1
+            else:
+                break
+        psar_bars_since_flip = cnt - 1
+        psar_flip_recent = psar_bars_since_flip <= 2
+        last_close = float(c.iloc[-1])
+        if last_close > 0:
+            psar_dist_pct = (last_close - psar_val) / last_close * 100
+
     return {
         "has_data": True,
         "n": n,
@@ -790,6 +908,15 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         "zscore": round(zscore, 2),
         "regime": regime,
         "hist_pct": round(hist_pct, 1),
+        # ADX / PSAR
+        "adx_hist": round(adx_hist, 1),
+        "adx_rising": adx_rising,
+        "di_bullish": di_bullish,
+        "psar": round(psar_val, 2),
+        "psar_bullish": psar_bullish,
+        "psar_flip_recent": psar_flip_recent,
+        "psar_bars_since_flip": psar_bars_since_flip,
+        "psar_dist_pct": round(psar_dist_pct, 2),
     }
 
 
@@ -923,14 +1050,27 @@ def score_dip(
         return 0, [], 0, 0
 
     # Scoring logic
-    rsi_pts = max(0, min(35, (50 - rsi) * 2))
+    rsi_pts = max(0, min(30, (50 - rsi) * 1.7))
     bb_range = (bb_high - bb_low) if bb_high > bb_low else price * 0.1
-    bb_pts = max(0, min(25, 25 * (1 - (price - bb_low) / bb_range))) if bb_low > 0 else 0
-    vol_pts = min(15, 15 * (vol / avg_vol)) if avg_vol > 0 else 0
-    stab_pts = min(15, hist.get("stability", 5) * 1.5)
-    flow_pts = max(0, min(10, hist.get("cmf", 0) * 30 + 5))
+    bb_pts = max(0, min(22, 22 * (1 - (price - bb_low) / bb_range))) if bb_low > 0 else 0
+    vol_pts = min(13, 13 * (vol / avg_vol)) if avg_vol > 0 else 0
+    stab_pts = min(13, hist.get("stability", 5) * 1.3)
+    flow_pts = max(0, min(9, hist.get("cmf", 0) * 27 + 4.5))
+    # A dip is only worth buying if the underlying trend hasn't actually
+    # broken — a pullback that just crossed below PSAR / DI- is a trend
+    # change wearing a "dip" costume.
+    trend_pts = 0
+    if hist.get("psar_bullish"):
+        trend_pts += 6
+    else:
+        trend_pts -= 8
+    if hist.get("di_bullish", True):
+        trend_pts += 4
+    trend_pts = _clamp(trend_pts, -8, 10)
 
-    score = round(rsi_pts + bb_pts + vol_pts + stab_pts + flow_pts)
+    score = round(rsi_pts + bb_pts + vol_pts + stab_pts + flow_pts + trend_pts)
+    if score <= 0:
+        return 0, [], 0, 0
 
     # Reasons
     if rsi <= 35: reasons.append("Oversold RSI")
@@ -940,9 +1080,14 @@ def score_dip(
     if near_7d_low: reasons.append("Near 7D Low")
     if hist.get("bull_divergence"): reasons.append("RSI Divergence")
     if hist.get("cmf", 0) > 0.05: reasons.append("CMF Positive")
+    if hist.get("psar_bullish"): reasons.append("Trend Intact (PSAR)")
+    else: reasons.append("PSAR Broken — caution")
 
     # Target and Stop
     stop, eff_atr = _compute_atr_stop(price, atr, hist.get("atr_20", 0), 1.0)
+    psar_stop = hist.get("psar", 0)
+    if hist.get("psar_bullish") and 0 < psar_stop < price:
+        stop = max(stop, round(psar_stop, 2))
     target_pct = _clamp((2.0 * eff_atr / price) * 100, 3.0, 8.0) if eff_atr > 0 else 4.0
     target = round(price * (1 + target_pct / 100), 2)
 
@@ -1005,20 +1150,38 @@ def score_intraday(
         elif price > ema5 and price > ema10:
             L1 += 5
             reasons.append("Above EMAs")
-    if adx >= 35:
-        L1 += 8
+    # ADX only means something once direction is confirmed — a strong reading
+    # with -DI in charge is a strong downtrend, not a buy signal.
+    di_ok = hist.get("di_bullish", True)
+    if adx >= 35 and di_ok:
+        L1 += 7
         reasons.append(f"ADX {adx:.0f} Strong")
-    elif adx >= 25:
-        L1 += 5
+    elif adx >= 25 and di_ok:
+        L1 += 4
         reasons.append(f"ADX {adx:.0f}")
     elif adx < 20:
+        L1 -= 4  # choppy / no trend to ride
+    elif adx >= 25 and not di_ok:
+        L1 -= 3  # trending, but against us
+    if hist.get("adx_rising"):
+        L1 += 2
+        reasons.append("ADX Rising")
+    # Parabolic SAR — fresh flip = timing edge, price below SAR = trend broken
+    if hist.get("psar_bullish"):
+        if hist.get("psar_flip_recent"):
+            L1 += 5
+            reasons.append("PSAR Flip Bullish")
+        else:
+            L1 += 2
+    else:
         L1 -= 4
+        reasons.append("Below PSAR")
     # 200-day regime context
     if hist["regime"] == "BULL":
         L1 += 2
     elif hist["regime"] == "BEAR":
         L1 -= 3
-    L1 = _clamp(L1, -5, LAYER_BUDGET["trend"])
+    L1 = _clamp(L1, -8, LAYER_BUDGET["trend"])
     if L1 > 0:
         layers_active += 1
 
@@ -1197,6 +1360,9 @@ def score_intraday(
         score = min(score, THRESH_INTRA - 1)
 
     stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], 0.6)
+    psar_stop = hist.get("psar", 0)
+    if hist.get("psar_bullish") and 0 < psar_stop < price:
+        stop = max(stop, round(psar_stop, 2))  # tighter of ATR floor vs. PSAR level
     raw_target_pct = (2.0 * eff_atr / price) * 100
     target_pct = _clamp(raw_target_pct, 2.0, 6.0)
     target = round(price * (1 + target_pct / 100), 2)
@@ -1264,12 +1430,29 @@ def score_swing(
     if hist["higher_lows"]:
         L1 += 4
         reasons.append("Higher Lows")
-    if adx >= 30:
+    di_ok = hist.get("di_bullish", True)
+    if adx >= 30 and di_ok:
         L1 += 4
         reasons.append(f"ADX {adx:.0f} Strong")
-    elif adx >= 25:
+    elif adx >= 25 and di_ok:
         L1 += 2
         reasons.append(f"ADX {adx:.0f}")
+    elif adx >= 25 and not di_ok:
+        L1 -= 3  # strong trend, wrong direction — avoid the chop-in-disguise trap
+    if hist.get("adx_rising") and di_ok:
+        L1 += 2
+        reasons.append("ADX Rising")
+    # Parabolic SAR — a fresh bullish flip is the actual entry-timing signal;
+    # being below PSAR means the trend this whole layer is scoring is already broken.
+    if hist.get("psar_bullish"):
+        if hist.get("psar_flip_recent"):
+            L1 += 4
+            reasons.append("PSAR Flip Bullish")
+        else:
+            L1 += 2
+    else:
+        L1 -= 5
+        reasons.append("Below PSAR")
     # 200-day anchoring
     if hist["ema200"] > 0 and price > hist["ema200"]:
         L1 += 2
@@ -1281,7 +1464,7 @@ def score_swing(
     if ema25 > 0 and price > ema25 > ema50:
         L1 += 5
         reasons.append("Price > EMA25 > EMA50")
-    L1 = _clamp(L1, 0, LAYER_BUDGET["trend"])
+    L1 = _clamp(L1, -8, LAYER_BUDGET["trend"])
     if L1 > 0:
         layers_active += 1
 
@@ -1483,6 +1666,9 @@ def score_swing(
         score = min(score, THRESH_SWING - 1)
 
     stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], 1.5)
+    psar_stop = hist.get("psar", 0)
+    if hist.get("psar_bullish") and 0 < psar_stop < price:
+        stop = max(stop, round(psar_stop, 2))
     raw_target_pct = (3.0 * eff_atr / price) * 100
     target_pct = _clamp(raw_target_pct, 4.0, 12.0)
     target = round(price * (1 + target_pct / 100), 2)
@@ -1540,7 +1726,15 @@ def score_longterm(
         L1 += 2
     elif hist["regime"] == "BEAR":
         L1 -= 4
-    L1 = _clamp(L1, 0, LAYER_BUDGET["trend"])
+    # For long-term entries we care less about a fresh PSAR flip (too noisy at
+    # this horizon) and more about whether the multi-month trend is intact.
+    if hist.get("psar_bullish"):
+        L1 += 2
+        reasons.append("Above PSAR")
+    elif hist.get("adx_hist", 0) >= 25 and not hist.get("di_bullish", True):
+        L1 -= 4  # established downtrend, not just noise — don't average in
+        reasons.append("Downtrend (ADX/DI)")
+    L1 = _clamp(L1, -4, LAYER_BUDGET["trend"])
     if L1 > 0:
         layers_active += 1
 
