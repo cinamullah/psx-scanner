@@ -96,7 +96,7 @@ THRESH_SWING = 50
 THRESH_LONG = 45
 THRESH_DIP = 40
 
-kse100 = [
+KSE100 = [
     "ABL", "ABOT", "AGP", "AICL", "AIRLINK", "AKBL", "ANL", "APL", "ARIF", "ASBK",
     "ASTL", "ATLH", "ATRL", "AVN", "BAFL", "BAHL", "BIPL", "BNWM", "BOP", "BWCL",
     "CEPB", "CHCC", "CHBL", "CNERGY", "COLG", "CPHL", "DAWH", "DCR", "DGKC", "EFERT",
