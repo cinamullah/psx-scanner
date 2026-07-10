@@ -42,18 +42,54 @@ CFG = {
     "REGIME_PERIOD": 50,  # MA period for market regime detection (was 200)
 }
 
-# ── 9-Layer Budgets (total = 100) ─────────────────────────────────────────────
-LAYER_BUDGET = {
-    "trend": 18,  # Layer 1: Multi-TF Trend Structure
-    "momentum": 17,  # Layer 2: Momentum Cascade + RS Rank
-    "volume": 13,  # Layer 3: Volume Footprint + Institutional Flow
-    "pattern": 12,  # Layer 4: Price Pattern + Mean Reversion
-    "breadth": 8,  # Layer 5: Market Breadth / Context
-    "volatility": 8,  # Layer 6: Volatility State
-    "historical": 10,  # Layer 7: Historical Quality
-    "flow": 10,  # Layer 8: Institutional Flow (OBV + CMF) ← NEW
-    "regime": 4,  # Layer 9: Market Regime ← NEW
+# ── Per-strategy layer budgets ────────────────────────────────────────────────
+# Intraday, Swing, and Long-Term are different strategies, not the same 9
+# layers wearing different thresholds. They used to share one LAYER_BUDGET
+# dict, meaning a same-day scalp weighted 30-day OBV trend the same as a
+# multi-month hold did. Each budget below still sums to 100 across the same
+# 9 layers, but the weighting reflects what actually matters at that horizon:
+#   - Intraday: trend/momentum/volume dominate; 30-day "historical quality"
+#     and macro regime barely matter for a trade closed same day.
+#   - Swing: roughly balanced, closest to the original weights.
+#   - Long-term: sector quality/trend, historical stability, institutional
+#     flow and macro regime dominate; daily volume spikes barely matter for
+#     a position you're building over weeks.
+LAYER_BUDGET_INTRA = {
+    "trend": 20,
+    "momentum": 20,
+    "volume": 16,
+    "pattern": 14,
+    "breadth": 8,
+    "volatility": 8,
+    "historical": 4,
+    "flow": 6,
+    "regime": 4,
 }
+LAYER_BUDGET_SWING = {
+    "trend": 18,
+    "momentum": 17,
+    "volume": 12,
+    "pattern": 12,
+    "breadth": 7,
+    "volatility": 8,
+    "historical": 12,
+    "flow": 10,
+    "regime": 4,
+}
+LAYER_BUDGET_LONG = {
+    "trend": 20,
+    "momentum": 14,
+    "volume": 8,
+    "pattern": 10,
+    "breadth": 6,
+    "volatility": 6,
+    "historical": 16,
+    "flow": 12,
+    "regime": 8,
+}
+assert sum(LAYER_BUDGET_INTRA.values()) == 100
+assert sum(LAYER_BUDGET_SWING.values()) == 100
+assert sum(LAYER_BUDGET_LONG.values()) == 100
 
 THRESH_INTRA = 55
 THRESH_SWING = 50
@@ -193,7 +229,22 @@ TV_COLS = [
     "High.3M",
     "Low.3M",
     "High.6M",
-    "Low.6M",  # ← NEW: wider range context
+    "Low.6M",  # ← wider range context
+    # ── 15-min resolution — the Intraday Scalps scorer uses these instead of
+    # the daily-resolution columns above; a "scalp" scored off a 5-day/10-day
+    # EMA isn't actually an intraday signal. TradingView's scanner accepts
+    # a `|<minutes>` suffix per-column, so we can pull both timeframes in
+    # one request. Indices 37–45.
+    "RSI|15",
+    "RSI[1]|15",
+    "MACD.macd|15",
+    "MACD.signal|15",
+    "MACD.hist|15",
+    "EMA5|15",
+    "EMA10|15",
+    "ADX|15",
+    "Stoch.K|15",
+    "Stoch.D|15",
 ]
 
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
@@ -1181,7 +1232,7 @@ def score_intraday(
         L1 += 2
     elif hist["regime"] == "BEAR":
         L1 -= 3
-    L1 = _clamp(L1, -8, LAYER_BUDGET["trend"])
+    L1 = _clamp(L1, -8, LAYER_BUDGET_INTRA["trend"])
     if L1 > 0:
         layers_active += 1
 
@@ -1216,7 +1267,7 @@ def score_intraday(
         reasons.append("Stoch Cross")
     elif stoch_k > 85:
         L2 -= 2
-    L2 = _clamp(L2, -5, LAYER_BUDGET["momentum"])
+    L2 = _clamp(L2, -5, LAYER_BUDGET_INTRA["momentum"])
     if L2 > 0:
         layers_active += 1
 
@@ -1235,7 +1286,7 @@ def score_intraday(
     if hist["vol_accumulation"]:
         L3 += 3
         reasons.append("Accumulation")
-    L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
+    L3 = _clamp(L3, 0, LAYER_BUDGET_INTRA["volume"])
     if L3 > 0:
         layers_active += 1
 
@@ -1281,7 +1332,7 @@ def score_intraday(
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
     if bb_pos > 0.92:
         L4 -= 3
-    L4 = _clamp(L4, -5, LAYER_BUDGET["pattern"])
+    L4 = _clamp(L4, -5, LAYER_BUDGET_INTRA["pattern"])
     if L4 > 0:
         layers_active += 1
 
@@ -1292,7 +1343,7 @@ def score_intraday(
     else:
         L5 -= 5
         reasons.append("Bearish Breadth")
-    L5 = _clamp(L5, -5, LAYER_BUDGET["breadth"])
+    L5 = _clamp(L5, -5, LAYER_BUDGET_INTRA["breadth"])
     if L5 > 0:
         layers_active += 1
 
@@ -1309,7 +1360,7 @@ def score_intraday(
         L6 -= 2
     if hist["consec_up"] >= 3:
         L6 += 2
-    L6 = _clamp(L6, -5, LAYER_BUDGET["volatility"])
+    L6 = _clamp(L6, -5, LAYER_BUDGET_INTRA["volatility"])
     if L6 > 0:
         layers_active += 1
 
@@ -1324,7 +1375,7 @@ def score_intraday(
         L7 += 3
     elif hist["stability"] < 3:
         L7 -= 3
-    L7 = _clamp(L7, -3, LAYER_BUDGET["historical"])
+    L7 = _clamp(L7, -3, LAYER_BUDGET_INTRA["historical"])
     if L7 > 0:
         layers_active += 1
 
@@ -1340,7 +1391,7 @@ def score_intraday(
         reasons.append(f"CMF {hist['cmf']:.2f}")
     elif hist["cmf"] < -0.1:
         L8 -= 3
-    L8 = _clamp(L8, -4, LAYER_BUDGET["flow"])
+    L8 = _clamp(L8, -4, LAYER_BUDGET_INTRA["flow"])
     if L8 > 0:
         layers_active += 1
 
@@ -1351,7 +1402,7 @@ def score_intraday(
         L9 += 4
     elif regime == "BEAR":
         L9 -= 3
-    L9 = _clamp(L9, -3, LAYER_BUDGET["regime"])
+    L9 = _clamp(L9, -3, LAYER_BUDGET_INTRA["regime"])
     if L9 > 0:
         layers_active += 1
 
@@ -1464,7 +1515,7 @@ def score_swing(
     if ema25 > 0 and price > ema25 > ema50:
         L1 += 5
         reasons.append("Price > EMA25 > EMA50")
-    L1 = _clamp(L1, -8, LAYER_BUDGET["trend"])
+    L1 = _clamp(L1, -8, LAYER_BUDGET_SWING["trend"])
     if L1 > 0:
         layers_active += 1
 
@@ -1508,7 +1559,7 @@ def score_swing(
         L2 += 1
     elif chg1w < -5:
         L2 -= 3
-    L2 = _clamp(L2, -5, LAYER_BUDGET["momentum"])
+    L2 = _clamp(L2, -5, LAYER_BUDGET_SWING["momentum"])
     if L2 > 0:
         layers_active += 1
 
@@ -1526,7 +1577,7 @@ def score_swing(
     if hist["vol_accumulation"]:
         L3 += 4
         reasons.append("Accumulation")
-    L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
+    L3 = _clamp(L3, 0, LAYER_BUDGET_SWING["volume"])
     if L3 > 0:
         layers_active += 1
 
@@ -1568,7 +1619,7 @@ def score_swing(
         reasons.append("Compressed")
     elif z < -2.0:
         L4 -= 2
-    L4 = _clamp(L4, 0, LAYER_BUDGET["pattern"])
+    L4 = _clamp(L4, 0, LAYER_BUDGET_SWING["pattern"])
     if L4 > 0:
         layers_active += 1
 
@@ -1579,7 +1630,7 @@ def score_swing(
     else:
         L5 -= 5
         reasons.append("Bearish Breadth")
-    L5 = _clamp(L5, -5, LAYER_BUDGET["breadth"])
+    L5 = _clamp(L5, -5, LAYER_BUDGET_SWING["breadth"])
     if L5 > 0:
         layers_active += 1
 
@@ -1600,7 +1651,7 @@ def score_swing(
         L6 -= 3
     if hist["trend_pct_10"] > 2:
         L6 += 1
-    L6 = _clamp(L6, -5, LAYER_BUDGET["volatility"])
+    L6 = _clamp(L6, -5, LAYER_BUDGET_SWING["volatility"])
     if L6 > 0:
         layers_active += 1
 
@@ -1628,7 +1679,7 @@ def score_swing(
         reasons.append(f"Hist@{hist_p:.0f}%")
     elif hist_p > 90:
         L7 -= 2
-    L7 = _clamp(L7, -3, LAYER_BUDGET["historical"])
+    L7 = _clamp(L7, -3, LAYER_BUDGET_SWING["historical"])
     if L7 > 0:
         layers_active += 1
 
@@ -1647,7 +1698,7 @@ def score_swing(
         reasons.append(f"CMF Positive")
     elif hist["cmf"] < -0.15:
         L8 -= 3
-    L8 = _clamp(L8, -4, LAYER_BUDGET["flow"])
+    L8 = _clamp(L8, -4, LAYER_BUDGET_SWING["flow"])
     if L8 > 0:
         layers_active += 1
 
@@ -1657,7 +1708,7 @@ def score_swing(
         L9 += 4
     elif hist["regime"] == "BEAR":
         L9 -= 3
-    L9 = _clamp(L9, -3, LAYER_BUDGET["regime"])
+    L9 = _clamp(L9, -3, LAYER_BUDGET_SWING["regime"])
     if L9 > 0:
         layers_active += 1
 
@@ -1734,7 +1785,7 @@ def score_longterm(
     elif hist.get("adx_hist", 0) >= 25 and not hist.get("di_bullish", True):
         L1 -= 4  # established downtrend, not just noise — don't average in
         reasons.append("Downtrend (ADX/DI)")
-    L1 = _clamp(L1, -4, LAYER_BUDGET["trend"])
+    L1 = _clamp(L1, -4, LAYER_BUDGET_LONG["trend"])
     if L1 > 0:
         layers_active += 1
 
@@ -1772,7 +1823,7 @@ def score_longterm(
     if chg1m < -25:
         L2 -= 5
         reasons.append("Falling Knife")
-    L2 = _clamp(L2, -10, LAYER_BUDGET["momentum"])
+    L2 = _clamp(L2, -10, LAYER_BUDGET_LONG["momentum"])
     if L2 > 0:
         layers_active += 1
 
@@ -1791,7 +1842,7 @@ def score_longterm(
     if hist["cmf"] > 0.05:
         L3 += 2
         reasons.append("CMF+")
-    L3 = _clamp(L3, 0, LAYER_BUDGET["volume"])
+    L3 = _clamp(L3, 0, LAYER_BUDGET_LONG["volume"])
     if L3 > 0:
         layers_active += 1
 
@@ -1823,7 +1874,7 @@ def score_longterm(
         if -2 < val_dist < 4:
             L4 += 3
             reasons.append("Vol Profile Support")
-    L4 = _clamp(L4, 0, LAYER_BUDGET["pattern"])
+    L4 = _clamp(L4, 0, LAYER_BUDGET_LONG["pattern"])
     if L4 > 0:
         layers_active += 1
 
@@ -1841,7 +1892,7 @@ def score_longterm(
         L5 += 1
     elif chg1w < -8:
         L5 -= 3
-    L5 = _clamp(L5, -3, LAYER_BUDGET["breadth"])
+    L5 = _clamp(L5, -3, LAYER_BUDGET_LONG["breadth"])
     if L5 > 0:
         layers_active += 1
 
@@ -1861,7 +1912,7 @@ def score_longterm(
         L6 += 1
     elif chg1m < -15:
         L6 -= 2
-    L6 = _clamp(L6, -3, LAYER_BUDGET["volatility"])
+    L6 = _clamp(L6, -3, LAYER_BUDGET_LONG["volatility"])
     if L6 > 0:
         layers_active += 1
 
@@ -1885,7 +1936,7 @@ def score_longterm(
         reasons.append(f"Hist Low@{hist_p:.0f}%")
     elif hist_p > 85:
         L7 -= 1
-    L7 = _clamp(L7, -2, LAYER_BUDGET["historical"])
+    L7 = _clamp(L7, -2, LAYER_BUDGET_LONG["historical"])
     if L7 > 0:
         layers_active += 1
 
@@ -1901,7 +1952,7 @@ def score_longterm(
         reasons.append(f"CMF {hist['cmf']:.2f}")
     elif hist["cmf"] < -0.15:
         L8 -= 4
-    L8 = _clamp(L8, -5, LAYER_BUDGET["flow"])
+    L8 = _clamp(L8, -5, LAYER_BUDGET_LONG["flow"])
     if L8 > 0:
         layers_active += 1
 
@@ -1911,7 +1962,7 @@ def score_longterm(
         L9 += 4
     elif hist["regime"] == "BEAR":
         L9 -= 4
-    L9 = _clamp(L9, -4, LAYER_BUDGET["regime"])
+    L9 = _clamp(L9, -4, LAYER_BUDGET_LONG["regime"])
     if L9 > 0:
         layers_active += 1
 
@@ -1962,8 +2013,8 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             bb_low = safe(d[9])
             bb_high = safe(d[10])
             ema20 = safe(d[11])
-            ema25 = safe(d[12])
-            ema50 = safe(d[13])
+            ema50 = safe(d[12])
+            ema25 = safe(d[13])
             chg1w = safe(d[14])
             high1m = safe(d[15])
             low1m = safe(d[16])
@@ -1983,10 +2034,25 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             macd_h = safe(d[30]) if len(d) > 30 else (macd - macd_sig)
             bb_basis = safe(d[32]) if len(d) > 32 else (bb_low + bb_high) / 2
             # New extended fields
-            high3m = safe(d[34]) if len(d) > 34 else high1m
-            low3m = safe(d[35]) if len(d) > 35 else low1m
-            high6m = safe(d[36]) if len(d) > 36 else high3m
-            low6m = safe(d[37]) if len(d) > 37 else low3m
+            high3m = safe(d[33]) if len(d) > 33 else high1m
+            low3m = safe(d[34]) if len(d) > 34 else low1m
+            high6m = safe(d[35]) if len(d) > 35 else high3m
+            low6m = safe(d[36]) if len(d) > 36 else low3m
+
+            # ── 15-min resolution fields, for the Intraday scorer only ──────
+            # Fall back to the daily value when TradingView doesn't return an
+            # intraday reading (illiquid names, off-hours snapshots, etc.) so
+            # the scorer never silently sees a zero.
+            rsi_15 = safe(d[37]) if len(d) > 37 and safe(d[37]) > 0 else rsi
+            rsi_15_prev = safe(d[38], rsi_15) if len(d) > 38 and safe(d[38]) > 0 else rsi_15
+            macd_15 = safe(d[39]) if len(d) > 39 else macd
+            macd_sig_15 = safe(d[40]) if len(d) > 40 else macd_sig
+            macd_h_15 = safe(d[41]) if len(d) > 41 else macd_h
+            ema5_15 = safe(d[42]) if len(d) > 42 and safe(d[42]) > 0 else ema5
+            ema10_15 = safe(d[43]) if len(d) > 43 and safe(d[43]) > 0 else ema10
+            adx_15 = safe(d[44]) if len(d) > 44 and safe(d[44]) > 0 else adx
+            stoch_k_15 = safe(d[45], 50) if len(d) > 45 and safe(d[45]) > 0 else stoch_k
+            stoch_d_15 = safe(d[46], 50) if len(d) > 46 and safe(d[46]) > 0 else stoch_d
 
             if price <= 0 or avg_vol <= 0:
                 continue
@@ -2011,20 +2077,20 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
                 continue
 
-            # ── INTRADAY ──────────────────────────────────────────────────────
+            # ── INTRADAY (scored on 15-min indicators, not daily) ───────────────
             sc, rs, tgt, stp, grd, la = score_intraday(
                 price,
                 change,
-                rsi,
-                macd,
-                macd_sig,
-                macd_h,
-                ema5,
-                ema10,
+                rsi_15,
+                macd_15,
+                macd_sig_15,
+                macd_h_15,
+                ema5_15,
+                ema10_15,
                 vwap,
-                adx,
-                stoch_k,
-                stoch_d,
+                adx_15,
+                stoch_k_15,
+                stoch_d_15,
                 vol,
                 avg_vol,
                 atr,
@@ -2037,7 +2103,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 bullish,
                 mkt_chg,
                 hist,
-                rsi_prev,
+                rsi_15_prev,
             )
             if sc >= THRESH_INTRA and tgt > price > stp:
                 intra.append(
@@ -2053,7 +2119,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                         "R1": r1,
                         "S1": s1,
                         "RV": round(rv, 1),
-                        "RSI": round(rsi, 0),
+                        "RSI": round(rsi_15, 0),
                         "Signals": " | ".join(rs[:4]),
                         "Target": tgt,
                         "Stop": stp,
