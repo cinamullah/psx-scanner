@@ -9,7 +9,6 @@ import json
 import math
 import os
 import sqlite3
-import time
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional, Tuple
 
@@ -110,100 +109,72 @@ THRESH_LONG = 45
 THRESH_DIP = 40
 
 # ── Universe ──────────────────────────────────────────────────────────────────
+# Full KSE-100 constituent list, per PSX's official re-composition notice
+# effective April 1, 2026 (psx.com.pk) and cross-checked live against the PSX
+# Data Portal's KSE-100 constituents table (dps.psx.com.pk/indices/KSE100).
+# The previous list here was a stale ~60-symbol subset containing several
+# tickers no longer in the index and was missing 40+ current constituents.
 KSE100 = [
-    "CNERGY",
-    "BOP",
-    "PRL",
-    "WTL",
-    "KOSM",
-    "KEL",
-    "UNITY",
-    "NCPL",
-    "CSIL",
-    "PAEL",
-    "SSGC",
-    "TRG",
-    "ATRL",
-    "MLCF",
-    "SYS",
-    "NPL",
-    "CLOV",
-    "YOUW",
-    "TELE",
-    "PTC",
-    "NBP",
-    "LUCK",
-    "DGKC",
-    "SNGP",
-    "PSO",
-    "NRL",
-    "OGDC",
-    "POL",
-    "PPL",
-    "NETSOL",
-    "MEBL",
-    "UBL",
-    "ABL",
-    "BAFL",
-    "BAHL",
-    "MARI",
-    "FFC",
-    "ENGROH",
-    "EFERT",
-    "ATLH",
-    "HCAR",
-    "MTL",
-    "COLG",
-    "ABOT",
-    "ILP",
-    "PIBTL",
-    "TGL",
-    "CHCC",
-    "HUBC",
-    "AIRLINK",
-    "HBL",
-    "MCB",
-    "FABL",
-    "JSBL",
-    "SILK",
-    "KAPCO",
-    "FCCL",
-    "POWER",
-    "ACPL",
-    "PIOC",
+    "ABL", "ABOT", "AGP", "AHCL", "AICL", "AIRLINK", "AKBL", "APL", "ATLH", "ATRL",
+    "BAFL", "BAHL", "BNWM", "BOP", "BWCL", "CHCC", "CNERGY", "COLG", "CPHL", "DCR",
+    "DGKC", "EFERT", "ENGROH", "FABL", "FATIMA", "FCCL", "FFC", "FFL", "FHAM", "GADT",
+    "GAL", "GHGL", "GHNI", "GLAXO", "HALEON", "HBL", "HCAR", "HGFA", "HINOON", "HMB",
+    "HUBC", "HUMNL", "IBFL", "ILP", "INDU", "INIL", "ISL", "JDWS", "JVDC", "KAPCO",
+    "KEL", "KOHC", "KTML", "LCI", "LOTCHEM", "LUCK", "MARI", "MCB", "MEBL", "MEHT",
+    "MLCF", "MTL", "MUREB", "NATF", "NBP", "NESTLE", "NML", "NPL", "OGDC", "PABC",
+    "PAEL", "PAKT", "PGLC", "PIBTL", "PIOC", "PKGS", "POL", "POWER", "PPL", "PSEL",
+    "PSO", "PSX", "PTC", "RMPL", "SAZEW", "SCBPL", "SEARL", "SHFA", "SNGP", "SRVI",
+    "SSGC", "SSOM", "SYS", "TGL", "THALL", "TPLRF1", "TRG", "UBL", "UPFL", "YOUW",
 ]
+assert len(KSE100) == 100
+assert len(set(KSE100)) == 100
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
         "symbols": [
-            "MEBL",
-            "UBL",
-            "ABL",
-            "BAFL",
-            "BAHL",
-            "BOP",
-            "NBP",
-            "HBL",
-            "MCB",
-            "FABL",
-            "JSBL",
-            "SILK",
+            "UBL", "BAHL", "BAFL", "BOP", "FABL", "MEBL", "HBL", "HMB",
+            "MCB", "NBP", "SCBPL", "AKBL", "ABL",
         ],
         "quality": 9,
     },
-    "E&P": {"symbols": ["OGDC", "PPL", "MARI", "POL"], "quality": 9},
-    "Fertilizer": {"symbols": ["FFC", "ENGROH", "EFERT"], "quality": 9},
-    "Cement": {"symbols": ["LUCK", "DGKC", "MLCF", "CHCC", "FCCL", "ACPL", "PIOC"], "quality": 7},
-    "Tech": {"symbols": ["SYS", "TRG", "PTC", "NETSOL", "AIRLINK"], "quality": 7},
-    "Power": {"symbols": ["HUBC", "KEL", "NCPL", "PAEL", "NPL", "KAPCO", "POWER"], "quality": 7},
-    "Oil & Gas": {"symbols": ["SNGP", "SSGC", "PSO", "NRL", "ATRL", "PRL", "CNERGY"], "quality": 8},
-    "Auto": {"symbols": ["ATLH", "HCAR", "MTL"], "quality": 6},
-    "Food": {"symbols": ["UNITY", "COLG"], "quality": 8},
-    "Pharma": {"symbols": ["ABOT"], "quality": 9},
-    "Textile": {"symbols": ["KOSM", "CLOV", "ILP"], "quality": 5},
-    "Misc": {"symbols": ["YOUW", "CSIL", "PIBTL", "TGL", "TELE"], "quality": 5},
+    "E&P": {"symbols": ["OGDC", "MARI", "POL", "PPL"], "quality": 9},
+    "Fertilizer": {"symbols": ["FFC", "EFERT", "AHCL", "FATIMA"], "quality": 9},
+    "Cement": {
+        "symbols": ["LUCK", "DGKC", "BWCL", "FCCL", "KOHC", "CHCC", "MLCF", "POWER", "PIOC"],
+        "quality": 7,
+    },
+    "Tech": {"symbols": ["SYS", "AIRLINK", "PTC", "TRG", "HUMNL"], "quality": 7},
+    "Power": {"symbols": ["HUBC", "KAPCO", "KEL", "NPL"], "quality": 7},
+    "Oil & Gas": {"symbols": ["PSO", "APL", "SNGP", "SSGC", "ATRL", "CNERGY"], "quality": 8},
+    "Auto": {
+        "symbols": ["MTL", "INDU", "SAZEW", "ATLH", "HCAR", "GAL", "GHNI", "THALL"],
+        "quality": 6,
+    },
+    "Food": {"symbols": ["NESTLE", "FFL", "MUREB", "COLG", "NATF", "RMPL", "UPFL"], "quality": 8},
+    "Pharma": {"symbols": ["SEARL", "AGP", "GLAXO", "ABOT", "CPHL", "HALEON", "HINOON"], "quality": 9},
+    "Textile": {"symbols": ["GADT", "YOUW", "NML", "MEHT", "KTML", "ILP", "BNWM", "IBFL"], "quality": 5},
+    "Chemical": {"symbols": ["LCI", "LOTCHEM"], "quality": 6},
+    "Insurance": {"symbols": ["AICL"], "quality": 7},
+    "Financial Services": {
+        "symbols": ["ENGROH", "PSX", "DCR", "TPLRF1", "FHAM", "PGLC", "HGFA"],
+        "quality": 6,
+    },
+    "Engineering": {"symbols": ["ISL", "INIL", "PAEL"], "quality": 6},
+    "Tobacco": {"symbols": ["PAKT"], "quality": 7},
+    "Misc": {
+        "symbols": [
+            "PIBTL", "JDWS", "PKGS", "SSOM", "SRVI", "TGL", "GHGL",
+            "PSEL", "PABC", "SHFA", "JVDC",
+        ],
+        "quality": 5,
+    },
 }
 SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
+
+# Every KSE100 symbol must resolve to a sector — get_hist_metrics/scoring silently
+# falls back to "Misc" quality otherwise, which would misprice long-term scores.
+_uncategorized = [s for s in KSE100 if s not in SYM_SECTOR]
+assert not _uncategorized, f"KSE100 symbols missing from SECTORS: {_uncategorized}"
 
 TV_COLS = [
     "name",
@@ -242,7 +213,7 @@ TV_COLS = [
     "High.3M",
     "Low.3M",
     "High.6M",
-    "Low.6M",  # ← wider range context
+    "Low.6M",  # fetched for potential range-context use; not yet consumed by any scorer
     # ── 15-min resolution — the Intraday Scalps scorer uses these instead of
     # the daily-resolution columns above; a "scalp" scored off a 5-day/10-day
     # EMA isn't actually an intraday signal. TradingView's scanner accepts
@@ -453,16 +424,16 @@ def save_snapshot(raw: list):
         rows = []
         for item in raw:
             d = item.get("d", [])
-            if len(d) >= 25 and d[0]:
+            if len(d) >= 26 and d[0]:
                 rows.append(
                     (
                         today,
                         d[0],
-                        safe(d[22]),
-                        safe(d[23]),
-                        safe(d[24]),
-                        safe(d[1]),
-                        int(safe(d[3])),
+                        safe(d[23]),  # open
+                        safe(d[24]),  # high
+                        safe(d[25]),  # low
+                        safe(d[1]),   # close
+                        int(safe(d[3])),  # volume
                     )
                 )
         if rows:
@@ -773,7 +744,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     h = df["high"]
     l = df["low"]
     v = df["volume"]
-    o = df["open"]
 
     # ── 1. Trend metrics ──────────────────────────────────────────────────────
     trend_pct_30 = (c.iloc[-1] / c.iloc[max(0, n - 30)] - 1) * 100 if n >= 30 else 0.0
@@ -1057,14 +1027,14 @@ def calculate_breadth_from_raw(raw: list) -> Tuple[float, bool, int, int, dict]:
     adv, dec = 0, 0
     for item in raw:
         d = item.get("d", [])
-        if not d or len(d) < 25:
+        if not d or len(d) < 26:
             continue
         sym = d[0]
         chg = safe(d[2])
         price = safe(d[1])
         vol = safe(d[3])
-        high = safe(d[23])
-        low = safe(d[24])
+        high = safe(d[24])
+        low = safe(d[25])
         if sym in KSE100:
             chgs.append(chg)
             prices.append(price)
@@ -1147,6 +1117,12 @@ def log_signal(conn: sqlite3.Connection, symbol: str, strategy: str, price: floa
     date this symbol+strategy setup first appeared. A signal re-firing every
     scan isn't a new setup, it's the same one still open; decay and expiry
     are measured against first_seen, not "now".
+
+    entry_price/target/stop are frozen at first detection and never
+    overwritten on later scans — they represent the hypothetical entry this
+    signal is actually being graded against. Only score/layers/last_seen
+    refresh, since those describe "why this setup is still live", not
+    "where you would have entered."
     """
     today = datetime.now().strftime("%Y-%m-%d")
     row = conn.execute(
@@ -1158,9 +1134,9 @@ def log_signal(conn: sqlite3.Connection, symbol: str, strategy: str, price: floa
     if row:
         first_seen = row[0]
         conn.execute(
-            "UPDATE signal_log SET last_seen=?, entry_price=?, target=?, stop=?, score=?, layers_json=? "
+            "UPDATE signal_log SET last_seen=?, score=?, layers_json=? "
             "WHERE symbol=? AND strategy=? AND first_seen=?",
-            (today, price, target, stop, score, layers_json, symbol, strategy, first_seen),
+            (today, score, layers_json, symbol, strategy, first_seen),
         )
     else:
         first_seen = today
@@ -1231,6 +1207,18 @@ def resolve_pending_signals(conn: sqlite3.Connection) -> int:
 
 
 # ── Vectorized win-rate validator (no per-ticker loops) ───────────────────────
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def _resolve_once_per_hour(_conn: sqlite3.Connection, hour_bucket: str) -> int:
+    """
+    resolve_pending_signals() only has new work to do after a SYNC — the
+    auto-refresh runs every REFRESH_SEC (180s) but price_history doesn't
+    change that often. Re-scanning every open signal against unchanged
+    data every 3 minutes is pure waste, so this throttles it to once per
+    wall-clock hour regardless of refresh cadence.
+    """
+    return resolve_pending_signals(_conn)
+
 
 class VectorizedSignalValidator:
     """
@@ -2192,7 +2180,7 @@ def score_swing(
         reasons.append(f"CMF {hist['cmf']:.2f}")
     elif hist["cmf"] > 0:
         L8 += 2
-        reasons.append(f"CMF Positive")
+        reasons.append("CMF Positive")
     elif hist["cmf"] < -0.15:
         L8 -= 3
     L8 = _clamp(L8, -4, LAYER_BUDGET_SWING["flow"])
@@ -2495,14 +2483,35 @@ def score_longterm(
 
 def process_signals(raw: list, bullish: bool, mkt_chg: float):
     if not raw:
-        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), pd.DataFrame(), {
+            "regime": "NEUTRAL", "scalar": 1.0, "thresholds": {
+                "INTRA": THRESH_INTRA, "SWING": THRESH_SWING, "LONG": THRESH_LONG, "DIP": THRESH_DIP,
+            },
+        }
 
     intra, swing, long_, dips = [], [], [], []
 
     conn = sqlite3.connect(CFG["DB_PATH"])
     try:
-        resolve_pending_signals(conn)
+        _resolve_once_per_hour(conn, datetime.now().strftime("%Y-%m-%d-%H"))
         regime = get_current_regime(conn)
+
+        # "Scale downstream signal thresholds mathematically based on the
+        # active regime's variance" — a favorable regime (scalar > 1) lowers
+        # the bar slightly; a choppy/distribution regime (scalar < 1) raises
+        # it, since signals fired in that state are empirically less
+        # reliable regardless of their raw additive score. Clamped so a
+        # single regime read can't swing the bar wildly.
+        regime_factor = _clamp(2 - regime.get("scalar", 1.0), 0.85, 1.2)
+        thresholds = {
+            "INTRA": round(THRESH_INTRA * regime_factor),
+            "SWING": round(THRESH_SWING * regime_factor),
+            "LONG": round(THRESH_LONG * regime_factor),
+            "DIP": round(THRESH_DIP * regime_factor),
+        }
+        regime["thresholds"] = thresholds
+        regime["regime_factor"] = regime_factor
+
         for item in raw:
             d = item.get("d", [])
             if len(d) < 28 or not d[0]:
@@ -2540,11 +2549,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             low7d = safe(d[29]) if len(d) > 29 else low_d
             macd_h = safe(d[30]) if len(d) > 30 else (macd - macd_sig)
             bb_basis = safe(d[32]) if len(d) > 32 else (bb_low + bb_high) / 2
-            # New extended fields
-            high3m = safe(d[33]) if len(d) > 33 else high1m
-            low3m = safe(d[34]) if len(d) > 34 else low1m
-            high6m = safe(d[35]) if len(d) > 35 else high3m
-            low6m = safe(d[36]) if len(d) > 36 else low3m
 
             # ── 15-min resolution fields, for the Intraday scorer only ──────
             # Fall back to the daily value when TradingView doesn't return an
@@ -2612,7 +2616,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 hist,
                 rsi_15_prev,
             )
-            if sc >= THRESH_INTRA and tgt > price > stp:
+            if sc >= thresholds["INTRA"] and tgt > price > stp:
                 intra.append(
                     {
                         "Symbol": sym,
@@ -2672,7 +2676,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 rsi_prev,
                 hist,
             )
-            if sc >= THRESH_SWING and tgt > price > stp:
+            if sc >= thresholds["SWING"] and tgt > price > stp:
                 swing.append(
                     {
                         "Symbol": sym,
@@ -2724,7 +2728,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 rsi_prev,
                 hist,
             )
-            if sc >= THRESH_LONG and tgt > price > stp:
+            if sc >= thresholds["LONG"] and tgt > price > stp:
                 long_.append(
                     {
                         "Symbol": sym,
@@ -2758,7 +2762,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                     price, rsi, stoch_k, bb_low, bb_high, low7d, atr, vol, avg_vol, hist
                 )
 
-                if dip_score >= THRESH_DIP and dip_target > price > dip_stop:
+                if dip_score >= thresholds["DIP"] and dip_target > price > dip_stop:
                     dips.append(
                         {
                             "Symbol": sym,
@@ -2802,7 +2806,7 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
         if lst
         else pd.DataFrame()
     )
-    return srt(intra_), srt(swing_), srt(long_2), srt(dips_)
+    return srt(intra_), srt(swing_), srt(long_2), srt(dips_), regime
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -3115,13 +3119,10 @@ if scan:
     st.markdown(f'<div class="sector-row">{tiles}</div>', unsafe_allow_html=True)
 
     # ── Run Signal Engine ─────────────────────────────────────────────────────
-    df_i, df_s, df_l, df_d = process_signals(raw, bullish, avg_chg)
-    if not df_i.empty:
-        df_i = df_i[df_i["Score"] >= THRESH_INTRA].reset_index(drop=True)
-    if not df_s.empty:
-        df_s = df_s[df_s["Score"] >= THRESH_SWING].reset_index(drop=True)
-    if not df_l.empty:
-        df_l = df_l[df_l["Score"] >= THRESH_LONG].reset_index(drop=True)
+    df_i, df_s, df_l, df_d, regime = process_signals(raw, bullish, avg_chg)
+    # process_signals already gates each row against its regime-scaled
+    # threshold internally — re-filtering here against the static THRESH_*
+    # constants would silently cancel out that scaling, so we don't.
     if not df_d.empty:
         df_d = df_d.reset_index(drop=True)
 
@@ -3150,9 +3151,9 @@ if scan:
 
     # ── INTRADAY ──────────────────────────────────────────────────────────────
     n_i = len(df_i)
-    st.markdown(f'<div class="section-header">Intraday Scalps</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Intraday Scalps</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="section-meta">{n_i} setups &middot; Threshold {THRESH_INTRA}/100 &middot; Breadth: {breadth_text} &middot; 4+/9 layer confluence required</div>',
+        f'<div class="section-meta">{n_i} setups &middot; Threshold {regime["thresholds"]["INTRA"]}/100 &middot; Breadth: {breadth_text} &middot; 4+/9 layer confluence required</div>',
         unsafe_allow_html=True,
     )
     render_table(
@@ -3195,9 +3196,9 @@ if scan:
 
     # ── SWING ─────────────────────────────────────────────────────────────────
     n_s = len(df_s)
-    st.markdown(f'<div class="section-header">Swing Trades</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Swing Trades</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="section-meta">{n_s} setups &middot; Threshold {THRESH_SWING}/100 &middot; 4+/9 layer confluence required</div>',
+        f'<div class="section-meta">{n_s} setups &middot; Threshold {regime["thresholds"]["SWING"]}/100 &middot; 4+/9 layer confluence required</div>',
         unsafe_allow_html=True,
     )
     render_table(
@@ -3240,9 +3241,9 @@ if scan:
 
     # ── LONG-TERM ─────────────────────────────────────────────────────────────
     n_l = len(df_l)
-    st.markdown(f'<div class="section-header">Long-Term Investments</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Long-Term Investments</div>', unsafe_allow_html=True)
     st.markdown(
-        f'<div class="section-meta">{n_l} setups &middot; Threshold {THRESH_LONG}/100 &middot; Sector quality ≥6 required</div>',
+        f'<div class="section-meta">{n_l} setups &middot; Threshold {regime["thresholds"]["LONG"]}/100 &middot; Sector quality ≥6 required</div>',
         unsafe_allow_html=True,
     )
     render_table(
@@ -3285,7 +3286,7 @@ if scan:
 
     # ── STOCKS ON DIP ─────────────────────────────────────────────────────────
     n_d = len(df_d)
-    st.markdown(f'<div class="section-header">Stocks on Dip</div>', unsafe_allow_html=True)
+    st.markdown('<div class="section-header">Stocks on Dip</div>', unsafe_allow_html=True)
     st.markdown(
         f'<div class="section-meta">{n_d} setups &middot; Uptrend (above EMA50) + Pullback detected &middot; CMF-enhanced quality scoring</div>',
         unsafe_allow_html=True,
