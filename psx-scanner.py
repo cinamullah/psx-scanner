@@ -109,7 +109,7 @@ KSE100 = [
     "BAHL",
     "MARI",
     "FFC",
-    "ENGROH",
+    "INDU",
     "EFERT",
     "ATLH",
     "HCAR",
@@ -126,7 +126,7 @@ KSE100 = [
     "MCB",
     "FABL",
     "JSBL",
-    "SILK",
+    "APL",
     "KAPCO",
     "FCCL",
     "POWER",
@@ -138,11 +138,11 @@ assert len(set(KSE100)) == 60, "KSE100 has duplicates"
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
-        "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL","JSBL","SILK"],
+        "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL","JSBL"],
         "quality": 9,
     },
     "E&P":          {"symbols": ["OGDC","MARI","POL","PPL"], "quality": 9},
-    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO","ENGROH"], "quality": 9},
+    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
     "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC","ACPL","POWER"], "quality": 7},
     "Tech":         {"symbols": ["SYS","PTC","TRG","NETSOL","AIRLINK"], "quality": 7},
     "Power":        {"symbols": ["HUBC","KEL","NCPL","NPL","KAPCO"], "quality": 7},
