@@ -17,7 +17,6 @@ import yfinance as yf
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
 
-# Suppress noisy yfinance / pandas FutureWarnings from Yahoo's side
 warnings.filterwarnings("ignore", category=FutureWarning)
 logging.getLogger("yfinance").setLevel(logging.CRITICAL)
 
@@ -27,9 +26,6 @@ st.set_page_config(
     initial_sidebar_state="collapsed",
 )
 
-# ══════════════════════════════════════════════════════════════════════════════
-# CONFIGURATION
-# ══════════════════════════════════════════════════════════════════════════════
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
@@ -44,19 +40,16 @@ CFG = {
     "DB_PATH": os.path.join(BASE_DIR, "psx_elite.db"),
     "HIST_DAYS": 365,
     "REGIME_PERIOD": 50,
-    # ── Risk engine ──────────────────────────────────────────────────────────
     "ACCOUNT_CAPITAL": 100_000,
     "MAX_RISK_PCT": 0.02,
     "FRACTIONAL_KELLY": 0.25,
     "ADV_PARTICIPATION_CAP": 0.08,
-    # ── Signal outcome tracking ───────────────────────────────────────────────
     "VALIDATOR_LOOKBACK_DAYS": 90,
     "VALIDATOR_MIN_SAMPLES": 15,
     "SIGNAL_HORIZON_DAYS": {"INTRA": 1, "SWING": 15, "LONG": 90, "DIP": 10},
     "SIGNAL_DECAY_TAU_DAYS": {"INTRA": 0.5, "SWING": 4.0, "LONG": 30.0, "DIP": 5.0},
 }
 
-# ── Per-strategy layer budgets ────────────────────────────────────────────────
 LAYER_BUDGET_INTRA = {
     "trend": 20, "momentum": 20, "volume": 16, "pattern": 14,
     "breadth": 8, "volatility": 8, "historical": 4, "flow": 6, "regime": 4,
@@ -78,11 +71,6 @@ THRESH_SWING = 50
 THRESH_LONG  = 45
 THRESH_DIP   = 40
 
-# ── Universe ──────────────────────────────────────────────────────────────────
-# GAL, ENGROH and TPLRF1 were removed — Yahoo Finance reports them as
-# "possibly delisted; no timezone found", causing sync failures every boot.
-# The three slots are filled with GHGL, JVDC and PSEL which were already
-# appearing in the SECTORS table but missing from the universe list.
 KSE100 = [
     "ABL",  "ABOT", "AGP",  "AHCL", "AICL", "AIRLINK","AKBL", "APL",  "ATLH", "ATRL",
     "BAFL", "BAHL", "BNWM", "BOP",  "BWCL", "CHCC",   "CNERGY","COLG","CPHL", "DCR",
@@ -93,17 +81,17 @@ KSE100 = [
     "MUREB","NATF", "NBP",  "NESTLE","NML", "NPL",    "OGDC", "PABC", "PAEL","PAKT",
     "PGLC", "PIBTL","PIOC", "PKGS", "POL",  "POWER",  "PPL",  "PSEL", "PSO", "PSX",
     "PTC",  "RMPL", "SAZEW","SCBPL","SEARL","SHFA",   "SNGP", "SRVI", "SSGC","SSOM",
-    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL", "PKOL","ENGRO",
+    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL", "ENGRO",
 ]
-assert len(KSE100) == 100, f"KSE100 has {len(KSE100)} symbols"
-assert len(set(KSE100)) == 100, "KSE100 has duplicates"
+assert len(KSE100) == 99, f"KSE100 has {len(KSE100)} symbols"
+assert len(set(KSE100)) == 99, "KSE100 has duplicates"
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
         "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL"],
         "quality": 9,
     },
-    "E&P":          {"symbols": ["OGDC","MARI","POL","PPL","SEPL","PKOL"], "quality": 9},
+    "E&P":          {"symbols": ["OGDC","MARI","POL","PPL","SEPL"], "quality": 9},
     "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
     "Cement": {
         "symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","POWER","PIOC"],
@@ -137,56 +125,6 @@ SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
 _uncategorized = [s for s in KSE100 if s not in SYM_SECTOR]
 assert not _uncategorized, f"KSE100 symbols missing from SECTORS: {_uncategorized}"
 
-# ── TradingView columns ───────────────────────────────────────────────────────
-# Index  Field              Timeframe   Used by
-# ─────  ─────────────────  ──────────  ─────────────────────────────────
-#  0     name               daily       all (symbol key)
-#  1     close              daily       all
-#  2     change             daily       all
-#  3     volume             daily       all
-#  4     relative_volume    daily       all
-#  5     average_volume_10d daily       all
-#  6     RSI                daily       swing, long, dip
-#  7     MACD.macd          daily       swing, long
-#  8     MACD.signal        daily       swing, long
-#  9     BB.lower           daily       all
-# 10     BB.upper           daily       all
-# 11     EMA20              daily       swing, long
-# 12     EMA50              daily       swing, long, dip-gate
-# 13     EMA25              daily       swing
-# 14     change|1W          daily       swing, long
-# 15     High.1M            daily       swing, long
-# 16     Low.1M             daily       swing, long
-# 17     VWAP               daily       intraday (price≥VWAP gate)
-# 18     EMA10              daily       swing
-# 19     ADX                daily       swing
-# 20     ATR                daily       all (stop sizing)
-# 21     Stoch.K            daily       swing, long, dip
-# 22     Stoch.D            daily       swing, long
-# 23     open               daily       intraday (gap-up detect)
-# 24     high               daily       all (pivot)
-# 25     low                daily       all (pivot)
-# 26     EMA5               daily       swing
-# 27     change|1M          daily       long
-# 28     RSI[1]             daily       swing, long (prev RSI)
-# 29     low|7D             daily       dip
-# 30     MACD.hist          daily       swing, long
-# 31     Pivot.M.Classic.Middle  daily  (not consumed)
-# 32     BB.basis           daily       all
-# 33     High.3M            daily       (not consumed)
-# 34     Low.3M             daily       (not consumed)
-# 35     High.6M            daily       (not consumed)
-# 36     Low.6M             daily       (not consumed)
-# 37     RSI|15             15-min      intraday
-# 38     RSI[1]|15          15-min      intraday (prev 15m RSI)
-# 39     MACD.macd|15       15-min      intraday
-# 40     MACD.signal|15     15-min      intraday
-# 41     MACD.hist|15       15-min      intraday
-# 42     EMA5|15            15-min      intraday
-# 43     EMA10|15           15-min      intraday
-# 44     ADX|15             15-min      intraday
-# 45     Stoch.K|15         15-min      intraday
-# 46     Stoch.D|15         15-min      intraday
 
 TV_COLS = [
     "name", "close", "change", "volume",
@@ -197,16 +135,11 @@ TV_COLS = [
     "open", "high", "low", "EMA5", "change|1M", "RSI[1]", "low|7D",
     "MACD.hist", "Pivot.M.Classic.Middle", "BB.basis",
     "High.3M", "Low.3M", "High.6M", "Low.6M",
-    # 15-min intraday columns (indices 37-46)
     "RSI|15", "RSI[1]|15", "MACD.macd|15", "MACD.signal|15", "MACD.hist|15",
     "EMA5|15", "EMA10|15", "ADX|15", "Stoch.K|15", "Stoch.D|15",
 ]
 
 TV_URL = "https://scanner.tradingview.com/pakistan/scan"
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CORE UTILITIES
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 def pkt_now() -> datetime:
@@ -254,11 +187,6 @@ def _grade(score: int, layers_active: int) -> str:
     if score >= 45 and layers_active >= 4:
         return "C"
     return "D"
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATABASE
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 def init_db():
@@ -309,7 +237,6 @@ def init_db():
                 CREATE INDEX IF NOT EXISTS idx_signal_status
                     ON signal_log(symbol, strategy, status);
             """)
-            # Schema migration: add rs_rank if missing
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(daily_snapshot)")
             columns = [info[1] for info in cursor.fetchall()]
@@ -481,11 +408,6 @@ def save_daily_snapshot(df: pd.DataFrame):
         conn.close()
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# HISTORICAL ANALYTICS ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 def _calc_obv(close: pd.Series, volume: pd.Series) -> pd.Series:
     delta     = close.diff()
     direction = np.where(delta > 0, 1, np.where(delta < 0, -1, 0))
@@ -650,31 +572,25 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     n = len(df)
     c = df["close"]; h = df["high"]; l = df["low"]; v = df["volume"]
 
-    # Trend
     trend_pct_30 = (c.iloc[-1] / c.iloc[max(0, n - 30)] - 1) * 100 if n >= 30 else 0.0
     trend_pct_10 = (c.iloc[-1] / c.iloc[max(0, n - 10)] - 1) * 100 if n >= 10 else 0.0
     trend_pct_60 = (c.iloc[-1] / c.iloc[max(0, n - 60)] - 1) * 100 if n >= 60 else 0.0
     return_3m    = (c.iloc[-1] / c.iloc[max(0, n - 63)] - 1) * 100 if n >= 63 else 0.0
 
-    # Stability
     up_days   = (c.diff() >= 0).tail(20).sum()
     stability = (up_days / 20) * 10 if n >= 20 else 0.0
 
-    # Volume
     avg_vol   = v.tail(30).mean() if n >= 30 else v.mean()
     recent_vol = v.tail(5).mean() if n >= 5 else avg_vol
     older_vol  = v.iloc[-20:-5].mean() if n >= 20 else avg_vol
     vol_trend  = (recent_vol / older_vol - 1) * 100 if older_vol > 0 else 0.0
 
-    # ATR
     tr    = pd.concat([h - l, (h - c.shift()).abs(), (l - c.shift()).abs()], axis=1).max(axis=1)
     atr_20 = float(tr.rolling(20).mean().iloc[-1]) if len(tr) >= 20 else 0.0
 
-    # Historical volatility
     returns    = c.pct_change().dropna()
     volatility = float(returns.tail(20).std()) * math.sqrt(252) * 100 if len(returns) >= 20 else 0.0
 
-    # EMAs
     ema5  = c.ewm(span=5,   adjust=False).mean()
     ema10 = c.ewm(span=10,  adjust=False).mean()
     ema20 = c.ewm(span=20,  adjust=False).mean()
@@ -689,7 +605,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     ema20_slope = _slope(ema20, 5)
     ema50_slope = _slope(ema50, 10)
 
-    # RSI
     delta_c  = c.diff()
     gain     = delta_c.where(delta_c > 0, 0)
     loss     = -delta_c.where(delta_c < 0, 0)
@@ -700,11 +615,9 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
     rsi_hist   = float(rsi_series.iloc[-1]) if not pd.isna(rsi_series.iloc[-1]) else 50.0
     rsi_slope  = float(rsi_series.iloc[-1] - rsi_series.iloc[max(0, len(rsi_series) - 4)]) if len(rsi_series) >= 4 else 0.0
 
-    # Support / Resistance
     support_level    = float(l.tail(20).min()) if n >= 20 else 0.0
     resistance_level = float(h.tail(20).max()) if n >= 20 else 0.0
 
-    # Consecutive streak
     consec_up = consec_down = 0
     if n > 1:
         diffs = c.diff().dropna()
@@ -741,7 +654,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         bb_width = ((2 * bb_std) / (bb_mean + 1e-9)) * 100
         squeeze = float(bb_width.iloc[-1]) < 4.0
 
-    # OBV
     obv      = _calc_obv(c, v)
     obv_slope = 0.0
     if len(obv) >= 10:
@@ -750,7 +662,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         if obv_vals.std() > 0:
             obv_slope = float(np.polyfit(xs, obv_vals / (obv_vals.std() + 1e-9), 1)[0])
 
-    # CMF, Volume Profile, Divergence, Z-score, Regime
     cmf            = _calc_cmf(h, l, c, v) if n >= 20 else 0.0
     poc, vah, val_vp = (
         _volume_profile_poc(c.tail(60), v.tail(60)) if n >= 20
@@ -768,7 +679,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         if hist_hi > hist_lo else 50.0
     )
 
-    # ADX / DI
     adx_hist = 0.0; adx_rising = False; di_bullish = True
     if n >= 20:
         adx_series, plus_di, minus_di = _calc_adx(h, l, c)
@@ -778,7 +688,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
                 adx_rising = adx_hist - float(adx_series.iloc[-6]) > 1.5
             di_bullish = bool(plus_di.iloc[-1] >= minus_di.iloc[-1])
 
-    # PSAR
     psar_val = 0.0; psar_bullish = True; psar_flip_recent = False
     psar_bars_since_flip = 99; psar_dist_pct = 0.0
     if n >= 10:
@@ -820,11 +729,6 @@ def get_hist_metrics(symbol: str, db_conn: sqlite3.Connection) -> Dict:
         "psar_dist_pct": round(psar_dist_pct, 2),
         "ret_series": c.pct_change().dropna().tail(60).tolist(),
     }
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# DATA FETCHING
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 @st.cache_resource
@@ -893,11 +797,6 @@ def fetch_kse_index() -> Optional[dict]:
     return None
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SCORING ENGINE — 9-Layer Wall Street Edition
-# ══════════════════════════════════════════════════════════════════════════════
-
-
 def _compute_atr_stop(price, atr, hist_atr, mult):
     eff = atr if atr > price * 0.002 else (hist_atr if hist_atr > 0 else price * 0.015)
     return round(price - mult * eff, 2), eff
@@ -908,11 +807,6 @@ def _bb_position(price, bb_low, bb_high, bb_basis):
     if span <= 0:
         return 0.5
     return max(0.0, min(1.0, (price - bb_low) / span))
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# INSTITUTIONAL RISK & VALIDATION ENGINE
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 def log_signal(conn, symbol, strategy, price, target, stop, score, layers) -> str:
@@ -1216,10 +1110,6 @@ def _apply_risk_engine(rows: List[Dict], strategy: str, conn, regime: Dict) -> L
     return rows
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# DIP BUY SCORER
-# ══════════════════════════════════════════════════════════════════════════════
-
 def score_dip(price, rsi, stoch_k, bb_low, bb_high, low7d, atr, vol, avg_vol, hist) -> Tuple[int, List[str], float, float]:
     """
     Scores stocks that are in an established uptrend (price > EMA50, checked
@@ -1276,19 +1166,15 @@ def score_dip(price, rsi, stoch_k, bb_low, bb_high, low7d, atr, vol, avg_vol, hi
     return score, reasons, target, stop
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# INTRADAY SCALP SCORER
-# ══════════════════════════════════════════════════════════════════════════════
-
 def score_intraday(
     price, change,
-    rsi, macd, macd_sig, macd_hist,          # 15-min indicators
-    ema5, ema10,                              # 15-min EMAs
-    vwap, adx, stoch_k, stoch_d,             # 15-min ADX/Stoch; VWAP=daily
-    vol, avg_vol, atr,                        # daily volume, daily ATR
-    bb_low, bb_high, bb_basis,               # daily BB bands
-    open_p, high_d, low_d,                   # daily OHLC
-    bullish, mkt_chg, hist, rsi_prev,        # breadth, hist-metrics, prev 15m RSI
+    rsi, macd, macd_sig, macd_hist,
+    ema5, ema10,
+    vwap, adx, stoch_k, stoch_d,
+    vol, avg_vol, atr,
+    bb_low, bb_high, bb_basis,
+    open_p, high_d, low_d,
+    bullish, mkt_chg, hist, rsi_prev,
 ) -> Tuple[int, List[str], float, float, str, int, Dict[str, float]]:
     """
     All momentum/trend indicators are 15-minute resolution pulled from
@@ -1300,13 +1186,11 @@ def score_intraday(
     layers_active = 0
     vol_ratio    = vol / avg_vol if avg_vol > 0 else 0
 
-    # Hard gates
     if price < CFG["MIN_PRICE"]:           return 0, [], 0, 0, "D", 0, {}
     if vol   < CFG["MIN_VOLUME"]:          return 0, [], 0, 0, "D", 0, {}
     if vol_ratio < 0.7:                    return 0, [], 0, 0, "D", 0, {}
     if price < vwap * 0.98:                return 0, [], 0, 0, "D", 0, {}
 
-    # L1: Multi-TF Trend (20)
     L1 = 0
     if open_p > 0 and price > open_p and change > 1.0:
         L1 += 4; reasons.append("Gap Up")
@@ -1330,7 +1214,6 @@ def score_intraday(
     L1 = _clamp(L1, -8, LAYER_BUDGET_INTRA["trend"])
     if L1 > 0: layers_active += 1
 
-    # L2: Momentum Cascade (20)
     L2 = 0
     rs_alpha = change - mkt_chg
     if rs_alpha > 1.5: L2 += 4; reasons.append(f"RS +{rs_alpha:.1f}%")
@@ -1349,7 +1232,6 @@ def score_intraday(
     L2 = _clamp(L2, -5, LAYER_BUDGET_INTRA["momentum"])
     if L2 > 0: layers_active += 1
 
-    # L3: Volume Footprint (16)
     L3 = 0
     if   vol_ratio >= CFG["INST_VOL_X"]: L3 += 10; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 2.0:               L3 += 7;  reasons.append(f"{vol_ratio:.1f}x Vol")
@@ -1359,7 +1241,6 @@ def score_intraday(
     L3 = _clamp(L3, 0, LAYER_BUDGET_INTRA["volume"])
     if L3 > 0: layers_active += 1
 
-    # L4: Price Pattern + Mean Reversion (14)
     L4 = 0
     vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
     if   -0.5 < vwap_dist < 0.5: L4 += 7; reasons.append("VWAP Bounce")
@@ -1385,13 +1266,11 @@ def score_intraday(
     L4 = _clamp(L4, -5, LAYER_BUDGET_INTRA["pattern"])
     if L4 > 0: layers_active += 1
 
-    # L5: Breadth (8)
     L5 = 6 if bullish else -5
     if not bullish: reasons.append("Bearish Breadth")
     L5 = _clamp(L5, -5, LAYER_BUDGET_INTRA["breadth"])
     if L5 > 0: layers_active += 1
 
-    # L6: Volatility State (8)
     L6 = 0
     hvol = hist["volatility"]
     if   20 < hvol < 45:  L6 += 6
@@ -1402,7 +1281,6 @@ def score_intraday(
     L6 = _clamp(L6, -5, LAYER_BUDGET_INTRA["volatility"])
     if L6 > 0: layers_active += 1
 
-    # L7: Historical Quality (4)
     L7 = 0
     if hist["momentum"] > 0.5:    L7 += 4; reasons.append("Hist Momentum")
     if hist["trend_pct_10"] > 2:  L7 += 3
@@ -1411,7 +1289,6 @@ def score_intraday(
     L7 = _clamp(L7, -3, LAYER_BUDGET_INTRA["historical"])
     if L7 > 0: layers_active += 1
 
-    # L8: Institutional Flow (6)
     L8 = 0
     if hist["obv_slope"] > 0.1:   L8 += 5; reasons.append("OBV Rising")
     elif hist["obv_slope"] < -0.1: L8 -= 3
@@ -1420,7 +1297,6 @@ def score_intraday(
     L8 = _clamp(L8, -4, LAYER_BUDGET_INTRA["flow"])
     if L8 > 0: layers_active += 1
 
-    # L9: Market Regime (4)
     L9 = 0
     if   hist["regime"] == "BULL": L9 += 4
     elif hist["regime"] == "BEAR": L9 -= 3
@@ -1443,14 +1319,10 @@ def score_intraday(
     return score, reasons, target, stop, _grade(score, layers_active), layers_active, layers
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# SWING TRADE SCORER
-# ══════════════════════════════════════════════════════════════════════════════
-
 def score_swing(
     price, change,
-    rsi, macd, macd_sig, macd_hist,          # daily indicators
-    ema5, ema10, ema20, ema25, ema50,        # daily EMAs
+    rsi, macd, macd_sig, macd_hist,
+    ema5, ema10, ema20, ema25, ema50,
     vwap, adx, atr, stoch_k, stoch_d,
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m, low1m, high1m,
@@ -1470,7 +1342,6 @@ def score_swing(
     if price < ema50 * 0.985:               return 0, [], 0, 0, "D", 0, {}
     if adx < 12:                             return 0, [], 0, 0, "D", 0, {}
 
-    # L1: Multi-TF Trend (18)
     L1 = 0
     if ema5 > 0 and price > ema20 > ema50:
         L1 += 14; reasons.append("EMA Trend (20/50)")
@@ -1496,7 +1367,6 @@ def score_swing(
     L1 = _clamp(L1, -8, LAYER_BUDGET_SWING["trend"])
     if L1 > 0: layers_active += 1
 
-    # L2: Momentum + RS Rank (17)
     L2 = 0
     rs_alpha = change - mkt_chg
     if rs_alpha > 1.0: L2 += 3; reasons.append(f"RS +{rs_alpha:.1f}%")
@@ -1519,7 +1389,6 @@ def score_swing(
     L2 = _clamp(L2, -5, LAYER_BUDGET_SWING["momentum"])
     if L2 > 0: layers_active += 1
 
-    # L3: Volume (12)
     L3 = 0
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if   vol_ratio >= 2.5: L3 += 9; reasons.append(f"{vol_ratio:.1f}x Vol")
@@ -1529,7 +1398,6 @@ def score_swing(
     L3 = _clamp(L3, 0, LAYER_BUDGET_SWING["volume"])
     if L3 > 0: layers_active += 1
 
-    # L4: Price Pattern + Mean Reversion (12)
     L4 = 0
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
     if bb_pos < 0.2 and change > 0: L4 += 5; reasons.append("BB Bounce")
@@ -1552,13 +1420,11 @@ def score_swing(
     L4 = _clamp(L4, 0, LAYER_BUDGET_SWING["pattern"])
     if L4 > 0: layers_active += 1
 
-    # L5: Breadth (7)
     L5 = 6 if bullish else -5
     if not bullish: reasons.append("Bearish Breadth")
     L5 = _clamp(L5, -5, LAYER_BUDGET_SWING["breadth"])
     if L5 > 0: layers_active += 1
 
-    # L6: Volatility (8)
     L6 = 0
     hvol = hist["volatility"]
     if   15 < hvol < 45:  L6 += 6
@@ -1571,7 +1437,6 @@ def score_swing(
     L6 = _clamp(L6, -5, LAYER_BUDGET_SWING["volatility"])
     if L6 > 0: layers_active += 1
 
-    # L7: Historical Quality (12)
     L7 = 0
     if hist["stability"] >= 7:    L7 += 5; reasons.append("Stable")
     elif hist["stability"] >= 5:  L7 += 2
@@ -1585,7 +1450,6 @@ def score_swing(
     L7 = _clamp(L7, -3, LAYER_BUDGET_SWING["historical"])
     if L7 > 0: layers_active += 1
 
-    # L8: Institutional Flow (10)
     L8 = 0
     if hist["obv_slope"] > 0.15:   L8 += 5; reasons.append("OBV Rising")
     elif hist["obv_slope"] < -0.1: L8 -= 3
@@ -1595,7 +1459,6 @@ def score_swing(
     L8 = _clamp(L8, -4, LAYER_BUDGET_SWING["flow"])
     if L8 > 0: layers_active += 1
 
-    # L9: Market Regime (4)
     L9 = 0
     if   hist["regime"] == "BULL": L9 += 4
     elif hist["regime"] == "BEAR": L9 -= 3
@@ -1618,13 +1481,9 @@ def score_swing(
     return score, reasons, target, stop, _grade(score, layers_active), layers_active, layers
 
 
-# ══════════════════════════════════════════════════════════════════════════════
-# LONG-TERM INVESTMENT SCORER
-# ══════════════════════════════════════════════════════════════════════════════
-
 def score_longterm(
-    price, rsi, macd, macd_sig, macd_hist,   # daily
-    ema20, ema50, stoch_k, stoch_d,          # daily EMAs, Stochastic
+    price, rsi, macd, macd_sig, macd_hist,
+    ema20, ema50, stoch_k, stoch_d,
     bb_low, bb_high, bb_basis,
     vol, avg_vol, chg1w, chg1m,
     low1m, high1m, sector, rsi_prev, hist,
@@ -1643,7 +1502,6 @@ def score_longterm(
     if quality < 6:                    return 0, [], 0, 0, "D", 0, {}
     if hist["stability"] < 2.0:        return 0, [], 0, 0, "D", 0, {}
 
-    # L1: Sector Quality + Trend (20)
     L1 = {9: 10, 8: 8, 7: 6}.get(quality, 3)
     if hist["ema200"] > 0 and price > hist["ema200"]:
         L1 += 5; reasons.append("Above EMA200")
@@ -1657,7 +1515,6 @@ def score_longterm(
     L1 = _clamp(L1, -4, LAYER_BUDGET_LONG["trend"])
     if L1 > 0: layers_active += 1
 
-    # L2: Value Zone / Momentum (14)
     L2 = 0
     if high1m > low1m > 0:
         dist_low = (price / low1m - 1) * 100
@@ -1678,7 +1535,6 @@ def score_longterm(
     L2 = _clamp(L2, -10, LAYER_BUDGET_LONG["momentum"])
     if L2 > 0: layers_active += 1
 
-    # L3: Volume (8)
     L3 = 0
     vol_ratio = vol / avg_vol if avg_vol > 0 else 0
     if hist["vol_accumulation"]: L3 += 7; reasons.append("Accumulation")
@@ -1688,7 +1544,6 @@ def score_longterm(
     L3 = _clamp(L3, 0, LAYER_BUDGET_LONG["volume"])
     if L3 > 0: layers_active += 1
 
-    # L4: Price Pattern + Value Area (10)
     L4 = 0
     if bb_basis > 0 and (price / bb_basis - 1) * 100 < 0:
         L4 += 5; reasons.append("Below Mean")
@@ -1706,7 +1561,6 @@ def score_longterm(
     L4 = _clamp(L4, 0, LAYER_BUDGET_LONG["pattern"])
     if L4 > 0: layers_active += 1
 
-    # L5: Breadth / Macro (6)
     L5 = 0
     if stoch_k > stoch_d and stoch_k < 50: L5 += 4; reasons.append("Stoch Recovery")
     if macd_hist > 0:   L5 += 3; reasons.append("MACD Hist+")
@@ -1716,7 +1570,6 @@ def score_longterm(
     L5 = _clamp(L5, -3, LAYER_BUDGET_LONG["breadth"])
     if L5 > 0: layers_active += 1
 
-    # L6: Volatility (6)
     L6 = 0
     hvol = hist["volatility"]
     if   hvol < 40:       L6 += 5
@@ -1728,7 +1581,6 @@ def score_longterm(
     L6 = _clamp(L6, -3, LAYER_BUDGET_LONG["volatility"])
     if L6 > 0: layers_active += 1
 
-    # L7: Historical Quality (16)
     L7 = 0
     if hist["stability"] >= 6:    L7 += 5
     elif hist["stability"] >= 4:  L7 += 2
@@ -1741,7 +1593,6 @@ def score_longterm(
     L7 = _clamp(L7, -2, LAYER_BUDGET_LONG["historical"])
     if L7 > 0: layers_active += 1
 
-    # L8: Institutional Flow (12)
     L8 = 0
     if hist["obv_slope"] > 0.1:    L8 += 5; reasons.append("OBV Rising")
     elif hist["obv_slope"] < -0.15: L8 -= 4
@@ -1750,7 +1601,6 @@ def score_longterm(
     L8 = _clamp(L8, -5, LAYER_BUDGET_LONG["flow"])
     if L8 > 0: layers_active += 1
 
-    # L9: Market Regime (8)
     L9 = 0
     if   hist["regime"] == "BULL": L9 += 4
     elif hist["regime"] == "BEAR": L9 -= 4
@@ -1774,11 +1624,6 @@ def score_longterm(
     layers = {"trend": L1, "momentum": L2, "volume": L3, "pattern": L4,
               "breadth": L5, "volatility": L6, "historical": L7, "flow": L8, "regime": L9}
     return score, reasons, target, stop, _grade(score, layers_active), layers_active, layers
-
-
-# ══════════════════════════════════════════════════════════════════════════════
-# SIGNAL PROCESSOR
-# ══════════════════════════════════════════════════════════════════════════════
 
 
 def process_signals(raw: list, bullish: bool, mkt_chg: float):
@@ -1843,7 +1688,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             macd_h   = safe(d[30])         if len(d) > 30 else (macd - macd_sig)
             bb_basis = safe(d[32])         if len(d) > 32 else (bb_low + bb_high) / 2
 
-            # ── 15-min fields (intraday scorer only) ─────────────────────────
             rsi_15      = safe(d[37]) if len(d) > 37 and safe(d[37]) > 0 else rsi
             rsi_15_prev = safe(d[38], rsi_15) if len(d) > 38 and safe(d[38]) > 0 else rsi_15
             macd_15     = safe(d[39]) if len(d) > 39 else macd
@@ -1864,7 +1708,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             if vol < max(CFG["MIN_VOLUME"], hist["avg_vol"] * 0.30):
                 continue
 
-            # Pivot levels
             h_piv = high_d if high_d > 0 else price
             l_piv = low_d  if low_d  > 0 else price
             p_piv = (h_piv + l_piv + price) / 3
@@ -1878,7 +1721,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
             is_buying   = (price > vwap) and (macd > macd_sig) and (rsi > 50)
             trend_label = "BUYING" if is_buying else "SELLING"
 
-            # ── INTRADAY (15-min indicators) ──────────────────────────────────
             sc, rs, tgt, stp, grd, la, lyr_intra = score_intraday(
                 price, change,
                 rsi_15, macd_15, macd_sig_15, macd_h_15,
@@ -1907,7 +1749,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 intra[-1]["_adv_vol"]    = avg_vol
                 intra[-1]["_ret_series"] = hist.get("ret_series", [])
 
-            # ── SWING (daily indicators) ───────────────────────────────────────
             sc, rs, tgt, stp, grd, la, lyr_swing = score_swing(
                 price, change, rsi, macd, macd_sig, macd_h,
                 ema5, ema10, ema20, ema25, ema50,
@@ -1932,7 +1773,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 swing[-1]["_adv_vol"]    = avg_vol
                 swing[-1]["_ret_series"] = hist.get("ret_series", [])
 
-            # ── LONG-TERM (daily indicators) ───────────────────────────────────
             perf1m = (price / low1m - 1) * 100 if low1m > 0 else 0.0
             sc, rs, tgt, stp, grd, la, lyr_long = score_longterm(
                 price, rsi, macd, macd_sig, macd_h,
@@ -1957,7 +1797,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
                 long_[-1]["_adv_vol"]    = avg_vol
                 long_[-1]["_ret_series"] = hist.get("ret_series", [])
 
-            # ── DIP BUY (daily indicators + hist) ─────────────────────────────
             is_uptrend = price > ema50 if ema50 > 0 else (price > ema20 if ema20 > 0 else False)
             if is_uptrend:
                 dip_score, dip_reasons, dip_target, dip_stop = score_dip(
@@ -1994,10 +1833,6 @@ def process_signals(raw: list, bullish: bool, mkt_chg: float):
     )
     return srt(intra_), srt(swing_), srt(long_2), srt(dips_), regime
 
-
-# ══════════════════════════════════════════════════════════════════════════════
-# CSS — Wall Street Dark Terminal
-# ══════════════════════════════════════════════════════════════════════════════
 
 st.markdown("""
 <style>
@@ -2173,9 +2008,6 @@ div[data-testid="stExpander"] {
 </style>
 """, unsafe_allow_html=True)
 
-# ══════════════════════════════════════════════════════════════════════════════
-# INIT
-# ══════════════════════════════════════════════════════════════════════════════
 
 init_db()
 
@@ -2190,7 +2022,7 @@ def _ensure_history_bootstrapped():
     try:
         sync_historical_data(KSE100, force=False)
     except Exception:
-        pass  # Never let a sync failure take down the whole app
+        pass
     return True
 
 
@@ -2214,7 +2046,6 @@ vol_cr       = idx_vol / 1e7
 state_text   = "LIVE ●" if is_open else "CLOSED"
 breadth_text = "BULLISH" if bullish else ("BEARISH" if avg_chg < -0.5 else "NEUTRAL")
 
-# ── Masthead ──────────────────────────────────────────────────────────────────
 head_cols = st.columns([8, 1, 1])
 with head_cols[0]:
     st.markdown(f"""
@@ -2242,7 +2073,6 @@ if sync_btn:
         st.error(f"Sync failed: {e}")
     st.rerun()
 
-# ── Market Summary Bar ────────────────────────────────────────────────────────
 pct_color = "#34d399" if idx_pct >= 0 else "#f87171"
 breadth_color = "#34d399" if bullish else "#f87171"
 st.markdown(f"""
@@ -2293,7 +2123,6 @@ if scan:
         st.warning("No data returned — check network or try again.")
         st.stop()
 
-    # ── Sector Heatmap ────────────────────────────────────────────────────────
     sec_perf: Dict[str, list] = {}
     for item in raw:
         d = item.get("d", [])
@@ -2316,7 +2145,6 @@ if scan:
         )
     st.markdown(f'<div class="sector-row">{tiles}</div>', unsafe_allow_html=True)
 
-    # ── Run Signal Engine ─────────────────────────────────────────────────────
     df_i, df_s, df_l, df_d, regime = process_signals(raw, bullish, avg_chg)
     if not df_d.empty:
         df_d = df_d.reset_index(drop=True)
@@ -2340,7 +2168,6 @@ if scan:
                 width="stretch",
             )
 
-    # ── INTRADAY ──────────────────────────────────────────────────────────────
     n_i = len(df_i)
     st.markdown('<div class="section-header">Intraday Scalps</div>', unsafe_allow_html=True)
     st.markdown(
@@ -2369,7 +2196,6 @@ if scan:
         },
     )
 
-    # ── SWING ─────────────────────────────────────────────────────────────────
     n_s = len(df_s)
     st.markdown('<div class="section-header">Swing Trades</div>', unsafe_allow_html=True)
     st.markdown(
@@ -2398,7 +2224,6 @@ if scan:
         },
     )
 
-    # ── LONG-TERM ─────────────────────────────────────────────────────────────
     n_l = len(df_l)
     st.markdown('<div class="section-header">Long-Term Investments</div>', unsafe_allow_html=True)
     st.markdown(
@@ -2427,7 +2252,6 @@ if scan:
         },
     )
 
-    # ── STOCKS ON DIP ─────────────────────────────────────────────────────────
     n_d = len(df_d)
     st.markdown('<div class="section-header">Stocks on Dip</div>', unsafe_allow_html=True)
     st.markdown(
@@ -2455,7 +2279,6 @@ if scan:
         },
     )
 
-    # ── TREND REVERSALS ───────────────────────────────────────────────────────
     st.markdown('<div class="section-header">Trend Reversals</div>', unsafe_allow_html=True)
     st.markdown('<div class="section-meta">Bias changes detected since previous session snapshot</div>', unsafe_allow_html=True)
 
@@ -2479,7 +2302,6 @@ if scan:
     else:
         st.markdown('<div class="paper-info">No trend reversals detected in this scan.</div>', unsafe_allow_html=True)
 
-# ── Footer ────────────────────────────────────────────────────────────────────
 st.markdown(f"""
 <div class="report-footer">
     Generated {now.strftime("%Y-%m-%d %H:%M:%S")} PKT
@@ -2490,7 +2312,6 @@ st.markdown(f"""
 </div>
 """, unsafe_allow_html=True)
 
-# ── Auto-refresh (market hours only) ─────────────────────────────────────────
 if is_open:
     st.iframe(
         f"""<script>
