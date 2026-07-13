@@ -113,7 +113,7 @@ KSE100 = [
     "MUREB","NATF", "NBP",  "NESTLE","NML", "NPL",    "OGDC", "PABC", "PAEL","PAKT",
     "PGLC", "PIBTL","PIOC", "PKGS", "POL",  "POWER",  "PPL",  "PSEL", "PSO", "PSX",
     "PTC",  "RMPL", "SAZEW","SCBPL","SEARL","SHFA",   "SNGP", "SRVI", "SSGC","SSOM",
-    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL","ENGROH",
+    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL","ENGROH", "SPSL",
 ]
 assert len(KSE100) == 100, f"KSE100 has {len(KSE100)} symbols"
 assert len(set(KSE100)) == 100, "KSE100 has duplicates"
