@@ -1,6 +1,6 @@
-streamlit
-pandas
-requests
-pytz
-urllib3
-yfinance
+streamlit==1.59.1
+pandas==2.3.3
+numpy==2.2.6
+yfinance==1.5.1
+pytz==2026.2
+requests==2.34.2
