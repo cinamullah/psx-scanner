@@ -1,23 +1,3 @@
-"""
-PSX Market Intelligence Report — Wall Street Edition
-KSE-100 · 9-Layer Signal Engine · Institutional-Grade Scanner
-─────────────────────────────────────────────────────────────
-Changes vs prior version
-  • Removed 3 delisted/broken Yahoo tickers: GAL, ENGROH, TPLRF1
-    Replaced with PKGS (already in list), SSOM (already in list);
-    added DCR, GADT, HGFA, GHGL, JVDC, PSEL, PABC, SHFA as coverage.
-    Universe re-verified to 100 unique, all sectored.
-  • Streamlit ≥1.59 deprecations fixed:
-      use_container_width=True  →  width='stretch'
-      st.components.v1.html     →  st.iframe (with same JS reload)
-  • Cold-start bootstrap now skips symbols already in DB; only
-    fetches what's missing instead of re-downloading everything.
-  • Yahoo batch download: failed tickers logged but don't abort sync.
-  • Data-field correctness: each scorer explicitly documents which
-    TradingView columns it consumes and from which timeframe.
-  • Minor: all yf deprecation warnings silenced via auto_adjust=True.
-"""
-
 import html
 import json
 import logging
@@ -113,7 +93,7 @@ KSE100 = [
     "MUREB","NATF", "NBP",  "NESTLE","NML", "NPL",    "OGDC", "PABC", "PAEL","PAKT",
     "PGLC", "PIBTL","PIOC", "PKGS", "POL",  "POWER",  "PPL",  "PSEL", "PSO", "PSX",
     "PTC",  "RMPL", "SAZEW","SCBPL","SEARL","SHFA",   "SNGP", "SRVI", "SSGC","SSOM",
-    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL", "PKOL","ENGROH",
+    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL", "PKOL","ENGRO",
 ]
 assert len(KSE100) == 100, f"KSE100 has {len(KSE100)} symbols"
 assert len(set(KSE100)) == 100, "KSE100 has duplicates"
