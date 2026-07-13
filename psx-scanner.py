@@ -138,24 +138,27 @@ assert len(set(KSE100)) == 60, "KSE100 has duplicates"
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
-        "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL"],
+        "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL","JSBL","SILK"],
         "quality": 9,
     },
     "E&P":          {"symbols": ["OGDC","MARI","POL","PPL"], "quality": 9},
-    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
-    "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC"], "quality": 7},
-    "Tech":         {"symbols": ["SYS","PTC"], "quality": 7},
-    "Power":        {"symbols": ["HUBC","KEL"], "quality": 7},
-    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","ATRL"], "quality": 8},
-    "Auto":         {"symbols": ["MTL","INDU","SAZEW","ATLH"], "quality": 6},
-    "Food":         {"symbols": ["NESTLE","COLG","NATF","RMPL","UPFL"], "quality": 8},
+    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO","ENGROH"], "quality": 9},
+    "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC","ACPL","POWER"], "quality": 7},
+    "Tech":         {"symbols": ["SYS","PTC","TRG","NETSOL","AIRLINK"], "quality": 7},
+    "Power":        {"symbols": ["HUBC","KEL","NCPL","NPL","KAPCO"], "quality": 7},
+    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","ATRL","CNERGY","PRL","NRL","SSGC"], "quality": 8},
+    "Auto":         {"symbols": ["MTL","INDU","SAZEW","ATLH","HCAR"], "quality": 6},
+    "Food":         {"symbols": ["NESTLE","COLG","NATF","RMPL","UPFL","UNITY","CLOV"], "quality": 8},
     "Pharma":       {"symbols": ["GLAXO","ABOT","HALEON"], "quality": 9},
-    "Textile":      {"symbols": ["GADT","KTML","ILP","IBFL"], "quality": 5},
+    "Textile":      {"symbols": ["GADT","KTML","ILP","IBFL","KOSM","YOUW"], "quality": 5},
     "Chemical":     {"symbols": ["LCI"], "quality": 6},
     "Financial Services": {"symbols": ["DCR"], "quality": 6},
     "Engineering":  {"symbols": ["PAEL"], "quality": 6},
     "Tobacco":      {"symbols": ["PAKT"], "quality": 7},
-    "Misc":         {"symbols": ["PKGS","SRVI"], "quality": 5},
+    "Telecom":      {"symbols": ["WTL","TELE"], "quality": 6},
+    "Insurance":    {"symbols": ["CSIL"], "quality": 6},
+    "Transport":    {"symbols": ["PIBTL"], "quality": 6},
+    "Misc":         {"symbols": ["PKGS","SRVI","TGL"], "quality": 5},
 }
 SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
 
