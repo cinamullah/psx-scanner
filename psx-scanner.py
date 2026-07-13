@@ -374,15 +374,34 @@ def sync_historical_data(symbols: List[str]):
         ph.error(f"Yahoo download failed: {e}")
         return
 
-    conn = sqlite3.connect(CFG["DB_PATH"])
+    # yf.download's own signature is Union[DataFrame, None] — a total outage,
+    # rate-limit block, or malformed response from Yahoo can make it return
+    # None (not raise). That was reaching df.columns.get_level_values(0)
+    # completely unguarded below and crashing the whole Streamlit run with an
+    # AttributeError. Bail out cleanly instead.
+    if df is None or df.empty:
+        ph.error("Yahoo returned no data (rate-limited or unreachable). Try SYNC again shortly.")
+        return
+
+    # A single-ticker request can come back with flat (non-MultiIndex)
+    # columns instead of (ticker, field) pairs — guard against that shape
+    # too rather than assuming get_level_values(0) is always ticker names.
+    has_ticker_level = isinstance(df.columns, pd.MultiIndex)
+
+    conn = sqlite3.connect(CFG["DB_PATH"], timeout=30)
     saved = 0
     try:
         for sym in symbols:
             try:
                 key = f"{sym}.KA"
-                if key not in df.columns.get_level_values(0):
+                if has_ticker_level:
+                    if key not in df.columns.get_level_values(0):
+                        continue
+                    ticker_df = df[key].dropna().reset_index()
+                elif len(symbols) == 1:
+                    ticker_df = df.dropna().reset_index()
+                else:
                     continue
-                ticker_df = df[key].dropna().reset_index()
                 if ticker_df.empty:
                     continue
                 rows = []
@@ -401,6 +420,8 @@ def sync_historical_data(symbols: List[str]):
                         )
                     except Exception:
                         continue
+                if not rows:
+                    continue
                 with conn:
                     conn.executemany(
                         "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
@@ -3022,9 +3043,15 @@ def _price_history_symbol_count(db_path: str) -> int:
 # any visible UI — the existing SYNC button still works for manual refreshes.
 @st.cache_resource
 def _ensure_history_bootstrapped():
-    have = _price_history_symbol_count(CFG["DB_PATH"])
-    if have < len(KSE100) * 0.5:  # most symbols missing → treat as cold start
-        sync_historical_data(KSE100)
+    try:
+        have = _price_history_symbol_count(CFG["DB_PATH"])
+        if have < len(KSE100) * 0.5:  # most symbols missing → treat as cold start
+            sync_historical_data(KSE100)
+    except Exception:
+        # Never let a cold-start sync failure (network, Yahoo outage, etc.)
+        # take down the whole app — scoring just runs with whatever history
+        # already exists (or none) until a manual SYNC succeeds.
+        pass
     return True
 
 
@@ -3076,7 +3103,10 @@ st.markdown(
 )
 
 if sync_btn:
-    sync_historical_data(KSE100)
+    try:
+        sync_historical_data(KSE100)
+    except Exception as e:
+        st.error(f"Sync failed: {e}")
     st.rerun()
 
 # ── Market Summary Bar ────────────────────────────────────────────────────────
