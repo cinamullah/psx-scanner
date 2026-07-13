@@ -72,53 +72,36 @@ THRESH_LONG  = 45
 THRESH_DIP   = 40
 
 KSE100 = [
-    "ABL",  "ABOT", "AGP",  "AHCL", "AICL", "AIRLINK","AKBL", "APL",  "ATLH", "ATRL",
-    "BAFL", "BAHL", "BNWM", "BOP",  "BWCL", "CHCC",   "CNERGY","COLG","CPHL", "DCR",
-    "DGKC", "EFERT","FABL", "FATIMA","FCCL","FFC",    "FFL",  "FHAM", "GADT", "GHGL",
-    "GHNI", "GLAXO","HALEON","HBL", "HCAR", "HGFA",   "HINOON","HMB","HUBC", "HUMNL",
-    "IBFL", "ILP",  "INDU", "INIL", "ISL",  "JDWS",   "JVDC", "KAPCO","KEL", "KOHC",
-    "KTML", "LCI",  "LOTCHEM","LUCK","MARI","MCB",    "MEBL", "MEHT", "MLCF","MTL",
-    "MUREB","NATF", "NBP",  "NESTLE","NML", "NPL",    "OGDC", "PABC", "PAEL","PAKT",
-    "PGLC", "PIBTL","PIOC", "PKGS", "POL",  "POWER",  "PPL",  "PSEL", "PSO", "PSX",
-    "PTC",  "RMPL", "SAZEW","SCBPL","SEARL","SHFA",   "SNGP", "SRVI", "SSGC","SSOM",
-    "SYS",  "TGL",  "THALL","TRG",  "UBL",  "UPFL",   "YOUW", "SEPL", "ENGRO",
+    "OGDC", "UBL",  "MEBL", "FFC",  "MARI", "LUCK", "PPL",  "MCB",  "HBL",  "NBP",
+    "NESTLE","PAKT","PTC",  "ENGRO","FATIMA","COLG","HUBC", "BWCL", "EFERT","SCBPL",
+    "ATLH", "KEL",  "SYS",  "ABL",  "POL",  "BAHL", "BAFL", "UPFL", "PSO",  "SNGP",
+    "PIOC", "INDU", "AKBL", "FABL", "FCCL", "GADT", "SAZEW","HMB",  "ILP",  "MTL",
+    "GLAXO","BOP",  "LCI",  "AHCL", "SRVI", "ATRL", "MLCF", "HALEON","RMPL","ABOT",
+    "DGKC", "NATF", "KOHC", "PAEL", "DCR",  "IBFL", "PKGS", "APL",  "CHCC", "KTML",
 ]
-assert len(KSE100) == 99, f"KSE100 has {len(KSE100)} symbols"
-assert len(set(KSE100)) == 99, "KSE100 has duplicates"
+assert len(KSE100) == 60, f"KSE100 has {len(KSE100)} symbols"
+assert len(set(KSE100)) == 60, "KSE100 has duplicates"
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
         "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL"],
         "quality": 9,
     },
-    "E&P":          {"symbols": ["OGDC","MARI","POL","PPL","SEPL"], "quality": 9},
+    "E&P":          {"symbols": ["OGDC","MARI","POL","PPL"], "quality": 9},
     "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
-    "Cement": {
-        "symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","POWER","PIOC"],
-        "quality": 7,
-    },
-    "Tech":         {"symbols": ["SYS","AIRLINK","PTC","TRG","HUMNL"], "quality": 7},
-    "Power":        {"symbols": ["HUBC","KAPCO","KEL","NPL"], "quality": 7},
-    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","SSGC","ATRL","CNERGY"], "quality": 8},
-    "Auto": {
-        "symbols": ["MTL","INDU","SAZEW","ATLH","HCAR","GHNI","THALL"],
-        "quality": 6,
-    },
-    "Food":         {"symbols": ["NESTLE","FFL","MUREB","COLG","NATF","RMPL","UPFL"], "quality": 8},
-    "Pharma":       {"symbols": ["SEARL","AGP","GLAXO","ABOT","CPHL","HALEON","HINOON"], "quality": 9},
-    "Textile":      {"symbols": ["GADT","YOUW","NML","MEHT","KTML","ILP","BNWM","IBFL"], "quality": 5},
-    "Chemical":     {"symbols": ["LCI","LOTCHEM"], "quality": 6},
-    "Insurance":    {"symbols": ["AICL"], "quality": 7},
-    "Financial Services": {
-        "symbols": ["PSX","DCR","FHAM","PGLC","HGFA"],
-        "quality": 6,
-    },
-    "Engineering":  {"symbols": ["ISL","INIL","PAEL"], "quality": 6},
+    "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC"], "quality": 7},
+    "Tech":         {"symbols": ["SYS","PTC"], "quality": 7},
+    "Power":        {"symbols": ["HUBC","KEL"], "quality": 7},
+    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","ATRL"], "quality": 8},
+    "Auto":         {"symbols": ["MTL","INDU","SAZEW","ATLH"], "quality": 6},
+    "Food":         {"symbols": ["NESTLE","COLG","NATF","RMPL","UPFL"], "quality": 8},
+    "Pharma":       {"symbols": ["GLAXO","ABOT","HALEON"], "quality": 9},
+    "Textile":      {"symbols": ["GADT","KTML","ILP","IBFL"], "quality": 5},
+    "Chemical":     {"symbols": ["LCI"], "quality": 6},
+    "Financial Services": {"symbols": ["DCR"], "quality": 6},
+    "Engineering":  {"symbols": ["PAEL"], "quality": 6},
     "Tobacco":      {"symbols": ["PAKT"], "quality": 7},
-    "Misc": {
-        "symbols": ["PIBTL","JDWS","PKGS","SSOM","SRVI","TGL","GHGL","PSEL","PABC","SHFA","JVDC"],
-        "quality": 5,
-    },
+    "Misc":         {"symbols": ["PKGS","SRVI"], "quality": 5},
 }
 SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
 
