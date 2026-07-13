@@ -1740,9 +1740,9 @@ def score_intraday(
     elif rsi >= 75:
         L2 -= 6
         reasons.append("Overbought")
-    if hist["bull_divergence"]:
-        L2 += 3
-        reasons.append("RSI Divergence")
+    # NOTE: daily-RSI divergence deliberately excluded here (unlike swing/
+    # long-term) — this scorer runs on 15-min indicators for timing, and a
+    # multi-day divergence pattern has no bearing on a same-day scalp entry.
     if stoch_k > stoch_d and 30 < stoch_k < 85:
         L2 += 3
         reasons.append("Stoch Cross")
@@ -2282,13 +2282,18 @@ def score_longterm(
     L2 = 0
     if high1m > low1m > 0:
         dist_low = (price / low1m - 1) * 100
+        # A price sitting AT the monthly low (dist_low near 0) with RSI still
+        # falling is a breakdown in progress, not a value entry — the old
+        # unbounded "< 10" branch rewarded both cases identically. Require a
+        # floor on distance from the low (some basing has happened) and on
+        # RSI (downside momentum has stabilized) before crediting it as value.
         if hist["triple_bottom"] and dist_low < 5:
             L2 += 13
             reasons.append("Triple Bottom")
         elif 0.3 < dist_low < 4 and rsi > 28:
             L2 += 8
             reasons.append("Near Monthly Low")
-        elif dist_low < 10:
+        elif 1.0 < dist_low < 10 and rsi > 32:
             L2 += 5
             reasons.append("Value Zone")
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
@@ -2992,6 +2997,39 @@ div[data-testid="stExpander"] {
 # ══════════════════════════════════════════════════════════════════════════════
 
 init_db()
+
+
+def _price_history_symbol_count(db_path: str) -> int:
+    """How many distinct symbols already have historical bars saved."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(DISTINCT symbol) FROM price_history")
+        row = cur.fetchone()
+        return int(row[0]) if row else 0
+    finally:
+        conn.close()
+
+
+# Every scoring layer (regime, stability, ADX/PSAR, OBV/CMF, divergence,
+# z-score, and the Long-Term strategy's hard stability gate) reads from
+# price_history via get_hist_metrics(). That table starts empty and was
+# previously only ever populated by a user manually clicking "SYNC" —
+# meaning Long-Term signals were hard-rejected (stability < 2.0 gate) and
+# Intraday/Swing silently ran with several layers permanently neutral on
+# every fresh deploy, which is the main reason the scanner looked broken.
+# This one-time, session-cached bootstrap sync fixes that without adding
+# any visible UI — the existing SYNC button still works for manual refreshes.
+@st.cache_resource
+def _ensure_history_bootstrapped():
+    have = _price_history_symbol_count(CFG["DB_PATH"])
+    if have < len(KSE100) * 0.5:  # most symbols missing → treat as cold start
+        sync_historical_data(KSE100)
+    return True
+
+
+_ensure_history_bootstrapped()
+
 is_open = is_market_open()
 raw_data = fetch_live()
 avg_chg, bullish, adv, dec, kse_fb = calculate_breadth_from_raw(raw_data)
