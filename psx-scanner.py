@@ -473,14 +473,7 @@ if market_open and not scan_clicked:
             scan_live_data()
 
 # ── Today Live ───────────────────────────────────────────────────────────
-st.markdown('<div class="section-header">Today — Live Spikes</div>', unsafe_allow_html=True)
-
-s = get_meta("last_scan_time") or "—"
-sy = get_meta("last_sync_date") or "—"
-st.markdown(
-    f'<div class="section-meta">Scan: {s} &middot; Sync: {sy}</div>',
-    unsafe_allow_html=True,
-)
+st.markdown('<div class="section-header"><b>Today</b> — Live Spikes</div>', unsafe_allow_html=True)
 
 today_str = now.strftime('%Y-%m-%d')
 with sqlite3.connect(DB_NAME) as conn:
@@ -517,14 +510,10 @@ with sqlite3.connect(DB_NAME) as conn:
                   conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
 
 for i, title in enumerate(["Yesterday", "Two Days Ago"]):
-    st.markdown(f'<div class="section-header">{title}</div>', unsafe_allow_html=True)
+    st.markdown(f'<div class="section-header"><b>{title}</b></div>', unsafe_allow_html=True)
     st.markdown('<div class="data-card">', unsafe_allow_html=True)
     if i < len(hist_dates):
         target_date = hist_dates[i]
-        st.markdown(
-            f'<div class="section-meta" style="margin-bottom:6px">{target_date}</div>',
-            unsafe_allow_html=True,
-        )
         with sqlite3.connect(DB_NAME) as conn:
             df = pd.read_sql("""
                 SELECT symbol, rvol, price_change, volume_direction, price_direction
