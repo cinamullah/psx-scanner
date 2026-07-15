@@ -72,66 +72,13 @@ THRESH_LONG  = 45
 THRESH_DIP   = 40
 
 KSE100 = [
-    "CNERGY",
-    "BOP",
-    "PRL",
-    "WTL",
-    "KOSM",
-    "KEL",
-    "UNITY",
-    "NCPL",
-    "CSIL",
-    "PAEL",
-    "SSGC",
-    "TRG",
-    "ATRL",
-    "MLCF",
-    "SYS",
-    "NPL",
-    "CLOV",
-    "YOUW",
-    "TELE",
-    "PTC",
-    "NBP",
-    "LUCK",
-    "DGKC",
-    "SNGP",
-    "PSO",
-    "NRL",
-    "OGDC",
-    "POL",
-    "PPL",
-    "NETSOL",
-    "MEBL",
-    "UBL",
-    "ABL",
-    "BAFL",
-    "BAHL",
-    "MARI",
-    "FFC",
-    "INDU",
-    "EFERT",
-    "ATLH",
-    "HCAR",
-    "MTL",
-    "COLG",
-    "ABOT",
-    "ILP",
-    "PIBTL",
-    "TGL",
-    "CHCC",
-    "HUBC",
-    "AIRLINK",
-    "HBL",
-    "MCB",
-    "FABL",
-    "JSBL",
-    "APL",
-    "KAPCO",
-    "FCCL",
-    "POWER",
-    "ACPL",
-    "PIOC",
+    "CNERGY", "BOP", "PRL", "WTL", "KOSM", "KEL", "UNITY", "NCPL", "CSIL",
+    "PAEL", "SSGC", "TRG", "ATRL", "MLCF", "SYS", "NPL", "CLOV", "YOUW",
+    "TELE", "PTC", "NBP", "LUCK", "DGKC", "SNGP", "PSO", "NRL", "OGDC",
+    "POL", "PPL", "NETSOL", "MEBL", "UBL", "ABL", "BAFL", "BAHL", "MARI",
+    "FFC", "ENGROH", "EFERT", "ATLH", "HCAR", "MTL", "COLG", "ABOT", "ILP",
+    "PIBTL", "TGL", "CHCC", "HUBC", "AIRLINK", "HBL", "MCB", "FABL", "JSBL",
+    "SILK", "KAPCO", "FCCL", "POWER", "ACPL", "PIOC",
 ]
 assert len(KSE100) == 60, f"KSE100 has {len(KSE100)} symbols"
 assert len(set(KSE100)) == 60, "KSE100 has duplicates"
@@ -142,11 +89,11 @@ SECTORS: Dict[str, Dict] = {
         "quality": 9,
     },
     "E&P":          {"symbols": ["OGDC","MARI","POL","PPL"], "quality": 9},
-    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
+    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGROH"], "quality": 9},
     "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC","ACPL","POWER"], "quality": 7},
     "Tech":         {"symbols": ["SYS","PTC","TRG","NETSOL","AIRLINK"], "quality": 7},
     "Power":        {"symbols": ["HUBC","KEL","NCPL","NPL","KAPCO"], "quality": 7},
-    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","ATRL","CNERGY","PRL","NRL","SSGC"], "quality": 8},
+    "Oil & Gas":    {"symbols": ["PSO","SILK","SNGP","ATRL","CNERGY","PRL","NRL","SSGC"], "quality": 8},
     "Auto":         {"symbols": ["MTL","INDU","SAZEW","ATLH","HCAR"], "quality": 6},
     "Food":         {"symbols": ["NESTLE","COLG","NATF","RMPL","UPFL","UNITY","CLOV"], "quality": 8},
     "Pharma":       {"symbols": ["GLAXO","ABOT","HALEON"], "quality": 9},
@@ -2353,11 +2300,336 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if is_open:
-    st.iframe(
-        f"""<script>
-            setTimeout(function() {{
-                window.parent.location.reload();
-            }}, {CFG["REFRESH_SEC"] * 1000});
-        </script>""",
-        height=0,
+    try:
+        st.markdown(
+            f'<meta http-equiv="refresh" content="{CFG["REFRESH_SEC"]}">',
+            unsafe_allow_html=True,
+        )
+    except Exception:
+        # If a ticker fails to fetch / refresher cannot be injected, ignore.
+        pass
+
+
+# ══════════════════════════════════════════════════════════════════════════
+#  PSX VOLUME SPIKE SCANNER  (combined from psxvolume.py — placed at bottom)
+# ══════════════════════════════════════════════════════════════════════════
+from datetime import time
+from zoneinfo import ZoneInfo
+
+# ── Volume Scanner Configuration ─────────────────────────────────────────
+VOL_DB_NAME = "volume_scanner.db"
+VOL_TZ = ZoneInfo("Asia/Karachi")
+VOL_MARKET_OPEN = time(9, 15)
+VOL_MARKET_CLOSE = time(15, 30)
+VOL_RVOL_THRESHOLD = 1.0
+VOL_SNAPSHOT_INTERVAL_MIN = 15
+VOL_TV_URL = "https://scanner.tradingview.com/pakistan/scan"
+
+VOL_WATCHLIST = [
+    "ABL.KA", "ABOT.KA", "AGP.KA", "AICL.KA", "AIRLINK.KA", "AKBL.KA", "ATLH.KA",
+    "ATRL.KA", "BAFL.KA", "BAHL.KA", "BOP.KA", "BPL.KA", "BWCL.KA", "CHCC.KA",
+    "CNERGY.KA", "COLG.KA", "DGKC.KA", "EFERT.KA", "ENGRO.KA", "EPCL.KA",
+    "FATIMA.KA", "FCCL.KA", "FFC.KA", "FFL.KA", "GHGL.KA", "GHNI.KA", "HALEON.KA",
+    "HCAR.KA", "HINOON.KA", "HUBC.KA", "INDU.KA", "INIL.KA", "KAPCO.KA", "KEL.KA",
+    "KOHC.KA", "KTML.KA", "LCI.KA", "LUCK.KA", "MARI.KA", "MCB.KA", "MEBL.KA",
+    "NBP.KA", "OGDC.KA", "PAEL.KA", "PAKT.KA", "PIBTL.KA", "PIOC.KA", "PKGS.KA",
+    "PPL.KA", "PRL.KA", "PSO.KA", "PTC.KA", "SAZEW.KA", "SEARL.KA", "SNGP.KA",
+    "SYS.KA", "TGL.KA", "THALL.KA", "TPLP.KA", "TRG.KA", "UBL.KA", "WTL.KA"
+]
+
+
+def vol_init_db():
+    with sqlite3.connect(VOL_DB_NAME) as conn:
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS trading_dates (
+                idx INTEGER PRIMARY KEY, date TEXT UNIQUE
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS spikes (
+                date TEXT, symbol TEXT, rvol REAL, price_change REAL,
+                volume_direction TEXT, price_direction TEXT, UNIQUE(date, symbol)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS live_snapshots (
+                snap_time TEXT, symbol TEXT, cum_volume REAL, price REAL,
+                rvol REAL, price_change REAL, volume_direction TEXT,
+                price_direction TEXT, vol_chg_1h REAL, vol_chg_2h REAL,
+                UNIQUE(snap_time, symbol)
+            )
+        """)
+        conn.execute("""
+            CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)
+        """)
+        conn.commit()
+
+
+def vol_get_meta(key):
+    with sqlite3.connect(VOL_DB_NAME) as conn:
+        row = conn.execute("SELECT value FROM meta WHERE key = ?", (key,)).fetchone()
+    return row[0] if row else None
+
+
+def vol_set_meta(key, value):
+    with sqlite3.connect(VOL_DB_NAME) as conn:
+        conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)", (key, value))
+        conn.commit()
+
+
+def vol_is_market_open(now):
+    return now.weekday() < 5 and VOL_MARKET_OPEN <= now.time() <= VOL_MARKET_CLOSE
+
+
+def vol_direction_labels(change):
+    if change is None or pd.isna(change):
+        return "—"
+    if change > 0:
+        return "▲ Up"
+    if change < 0:
+        return "▼ Down"
+    return "— Flat"
+
+
+def vol_sync_historical_data():
+    try:
+        raw_data = yf.download(VOL_WATCHLIST, period="2mo", group_by='ticker', threads=True, progress=False)
+    except Exception as e:
+        st.error(f"Failed to download historical data: {e}")
+        return False
+
+    sample_ticker = VOL_WATCHLIST[0]
+    if sample_ticker not in raw_data or raw_data[sample_ticker].empty:
+        st.error("No historical data returned.")
+        return False
+
+    trading_days = raw_data[sample_ticker].index.strftime('%Y-%m-%d').tolist()
+    last_days = trading_days[-5:]
+
+    with sqlite3.connect(VOL_DB_NAME) as conn:
+        for idx, d_str in enumerate(reversed(last_days)):
+            conn.execute("INSERT OR REPLACE INTO trading_dates (idx, date) VALUES (?, ?)", (idx, d_str))
+
+        for symbol in VOL_WATCHLIST:
+            if symbol not in raw_data:
+                continue
+            df = raw_data[symbol].copy()
+            if df.empty:
+                continue
+            df = df.dropna(subset=['Volume', 'Close'])
+            if df.empty:
+                continue
+
+            sma_vol = df['Volume'].rolling(window=20).mean()
+            rvol = df['Volume'] / sma_vol
+            pct_change = df['Close'].pct_change() * 100
+            vol_diff = df['Volume'].diff()
+            clean_symbol = symbol.replace('.KA', '')
+
+            for date, val in rvol.tail(5).items():
+                if pd.isna(val) or val < VOL_RVOL_THRESHOLD:
+                    continue
+                pchg = pct_change.loc[date]
+                vdiff = vol_diff.loc[date]
+                pchg = None if pd.isna(pchg) else round(float(pchg), 2)
+                vol_dir = "▲ Rising" if (pd.notna(vdiff) and vdiff > 0) else "▼ Falling"
+                price_dir = vol_direction_labels(pchg)
+
+                conn.execute("""
+                    INSERT OR REPLACE INTO spikes
+                    (date, symbol, rvol, price_change, volume_direction, price_direction)
+                    VALUES (?, ?, ?, ?, ?, ?)
+                """, (date.strftime('%Y-%m-%d'), clean_symbol, round(float(val), 2), pchg, vol_dir, price_dir))
+        conn.commit()
+
+    vol_set_meta("last_sync_date", datetime.now(VOL_TZ).strftime('%Y-%m-%d'))
+    vol_set_meta("last_sync_time", datetime.now(VOL_TZ).isoformat())
+    return True
+
+
+def vol_fetch_tv_snapshot():
+    tv_symbols = ["PSX:" + s.replace(".KA", "") for s in VOL_WATCHLIST]
+    payload = {
+        "symbols": {"tickers": tv_symbols, "query": {"types": []}},
+        "columns": ["close", "volume", "change", "relative_volume_10d_calc"],
+    }
+    try:
+        resp = requests.post(VOL_TV_URL, json=payload, timeout=15, headers={"Content-Type": "application/json"})
+        resp.raise_for_status()
+        rows = resp.json().get("data", [])
+    except Exception as e:
+        st.error(f"Failed to fetch live data: {e}")
+        return {}
+
+    snapshot = {}
+    for row in rows:
+        tv_symbol = row.get("s", "")
+        clean_symbol = tv_symbol.replace("PSX:", "")
+        vals = row.get("d") or []
+        if len(vals) < 4:
+            continue
+        close, volume, change, rvol = vals[0], vals[1], vals[2], vals[3]
+        if close is None or volume is None or rvol is None:
+            continue
+        snapshot[clean_symbol] = {
+            "price": float(close),
+            "cum_volume": float(volume),
+            "price_change": round(float(change), 2) if change is not None else None,
+            "rvol": round(float(rvol), 2),
+        }
+    return snapshot
+
+
+def vol_snapshot_before(conn, symbol, today_str, cutoff_dt):
+    cutoff_str = cutoff_dt.strftime('%Y-%m-%d %H:%M')
+    return conn.execute("""
+        SELECT cum_volume, price FROM live_snapshots
+        WHERE symbol = ? AND snap_time LIKE ? AND snap_time <= ?
+        ORDER BY snap_time DESC LIMIT 1
+    """, (symbol, f"{today_str}%", cutoff_str)).fetchone()
+
+
+def vol_scan_live_data():
+    now = datetime.now(VOL_TZ)
+    tv_data = vol_fetch_tv_snapshot()
+    if not tv_data:
+        st.warning("No live data returned. Market may be closed.")
+        return False
+
+    today_str = now.strftime('%Y-%m-%d')
+    snap_time = now.strftime('%Y-%m-%d %H:%M')
+
+    with sqlite3.connect(VOL_DB_NAME) as conn:
+        for clean_symbol, vals in tv_data.items():
+            cum_volume = vals["cum_volume"]
+            price = vals["price"]
+            price_change = vals["price_change"]
+            rvol = vals["rvol"]
+
+            prev_row = vol_snapshot_before(conn, clean_symbol, today_str, now - timedelta(minutes=1))
+            if prev_row:
+                volume_direction = "▲ Rising" if cum_volume > prev_row[0] else "▼ Falling"
+                price_direction = vol_direction_labels(price - prev_row[1])
+            else:
+                volume_direction = "—"
+                price_direction = "—"
+
+            def pct_change_vs(cutoff_dt):
+                row = vol_snapshot_before(conn, clean_symbol, today_str, cutoff_dt)
+                if row and row[0]:
+                    return round(((cum_volume - row[0]) / row[0]) * 100, 2)
+                return None
+
+            vol_chg_1h = pct_change_vs(now - timedelta(minutes=60))
+            vol_chg_2h = pct_change_vs(now - timedelta(minutes=120))
+
+            if rvol < VOL_RVOL_THRESHOLD:
+                continue
+
+            conn.execute("""
+                INSERT OR REPLACE INTO live_snapshots
+                (snap_time, symbol, cum_volume, price, rvol, price_change,
+                 volume_direction, price_direction, vol_chg_1h, vol_chg_2h)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """, (snap_time, clean_symbol, cum_volume, price, rvol, price_change,
+                  volume_direction, price_direction, vol_chg_1h, vol_chg_2h))
+        conn.commit()
+
+    vol_set_meta("last_scan_time", now.isoformat())
+    return True
+
+
+st.markdown('<hr>', unsafe_allow_html=True)
+st.markdown('<div class="section-header">PSX Volume Spike Scanner</div>', unsafe_allow_html=True)
+st.markdown(
+    '<div class="section-meta">Relative Volume &middot; Live & Historical &middot; '
+    'Combined module &middot; Watchlist: {} symbols</div>'.format(len(VOL_WATCHLIST)),
+    unsafe_allow_html=True,
+)
+
+vol_init_db()
+
+vol_now = datetime.now(VOL_TZ)
+vol_market_open = vol_is_market_open(vol_now)
+
+vol_head_cols = st.columns([8, 1, 1])
+with vol_head_cols[0]:
+    st.markdown(
+        f'<div class="report-subtitle">PSX Volume Spike Scanner &middot; '
+        f'{vol_now.strftime("%A, %B %d, %Y")} &middot; {vol_now.strftime("%H:%M")} PKT</div>',
+        unsafe_allow_html=True,
     )
+with vol_head_cols[1]:
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
+    vol_scan_clicked = st.button("VOL-SCAN", use_container_width=True, key="volscan")
+with vol_head_cols[2]:
+    st.markdown('<div style="padding-top:8px"></div>', unsafe_allow_html=True)
+    vol_sync_clicked = st.button("VOL-SYNC", use_container_width=True, key="volsync")
+
+if vol_scan_clicked:
+    with st.spinner("Scanning live market data..."):
+        if vol_scan_live_data():
+            st.rerun()
+
+if vol_sync_clicked:
+    with st.spinner("Syncing historical data..."):
+        if vol_sync_historical_data():
+            st.rerun()
+
+if vol_market_open:
+    st.markdown(f'<meta http-equiv="refresh" content="{VOL_SNAPSHOT_INTERVAL_MIN * 60}">', unsafe_allow_html=True)
+
+vol_today_str = vol_now.strftime('%Y-%m-%d')
+with sqlite3.connect(VOL_DB_NAME) as conn:
+    vol_live_df = pd.read_sql(
+        """
+        SELECT snap_time, symbol, rvol, price_change, volume_direction, price_direction,
+               vol_chg_1h, vol_chg_2h
+        FROM live_snapshots
+        WHERE snap_time LIKE ?
+        ORDER BY snap_time DESC
+        """,
+        conn, params=(f"{vol_today_str}%",),
+    )
+
+st.markdown('<div class="data-card">', unsafe_allow_html=True)
+if not vol_live_df.empty:
+    vol_latest_time = vol_live_df['snap_time'].max()
+    vol_live_df = vol_live_df[vol_live_df['snap_time'] == vol_latest_time].drop(columns=['snap_time'])
+    vol_live_df = vol_live_df.sort_values('rvol', ascending=False)
+    vol_t = vol_latest_time.split(' ')[1]
+    st.markdown(
+        f'<div class="section-meta" style="margin-bottom:6px">{len(vol_live_df)} symbols &middot; {vol_t} PKT</div>',
+        unsafe_allow_html=True,
+    )
+    vol_live_df.columns = ["Symbol", "RVOL", "Chg %", "Vol Dir", "Pr Dir", "1H Vol \u0394 %", "2H Vol \u0394 %"]
+    st.dataframe(vol_live_df, use_container_width=True, hide_index=True)
+else:
+    st.markdown('<div class="paper-info">No volume spikes detected yet today.</div>', unsafe_allow_html=True)
+st.markdown('</div>', unsafe_allow_html=True)
+
+with sqlite3.connect(VOL_DB_NAME) as conn:
+    vol_hist_dates = [row[0] for row in
+                      conn.execute("SELECT date FROM trading_dates ORDER BY idx ASC LIMIT 2").fetchall()]
+
+for i, title in enumerate(["Yesterday", "Two Days Ago"]):
+    st.markdown(f'<div class="section-header"><b>{title}</b></div>', unsafe_allow_html=True)
+    st.markdown('<div class="data-card">', unsafe_allow_html=True)
+    if i < len(vol_hist_dates):
+        target_date = vol_hist_dates[i]
+        with sqlite3.connect(VOL_DB_NAME) as conn:
+            vol_df = pd.read_sql(
+                """
+                SELECT symbol, rvol, price_change, volume_direction, price_direction
+                FROM spikes WHERE date = ? ORDER BY rvol DESC
+                """,
+                conn, params=(target_date,),
+            )
+        if not vol_df.empty:
+            vol_df.columns = ["Symbol", "RVOL", "Chg %", "Vol Dir", "Pr Dir"]
+            st.dataframe(vol_df, use_container_width=True, hide_index=True)
+        else:
+            st.markdown('<div class="paper-info">No spikes on this day.</div>', unsafe_allow_html=True)
+    else:
+        st.markdown('<div class="paper-info">No data. Click VOL-SYNC to initialize.</div>', unsafe_allow_html=True)
+    st.markdown('</div>', unsafe_allow_html=True)
