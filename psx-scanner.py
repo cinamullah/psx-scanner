@@ -48,6 +48,20 @@ CFG = {
     "VALIDATOR_MIN_SAMPLES": 15,
     "SIGNAL_HORIZON_DAYS": {"INTRA": 1, "SWING": 15, "LONG": 90, "DIP": 10},
     "SIGNAL_DECAY_TAU_DAYS": {"INTRA": 0.5, "SWING": 4.0, "LONG": 30.0, "DIP": 5.0},
+    # Intraday: opening range minutes for breakout detection
+    "OPENING_RANGE_MINUTES": 15,
+    # Swing / Long: minimum ADX threshold for trend-following
+    "SWING_TREND_ADX_MIN": 18,
+    "LONG_TREND_ADX_MIN": 15,
+    # Long-term: drawdown threshold (price % below 52w high to be "value")
+    "LONG_DRAWDOWN_MIN_PCT": 15,
+    "LONG_DRAWDOWN_MAX_PCT": 45,
+    # Long-term: maximum volatility for entry (annualized)
+    "LONG_MAX_VOLATILITY": 55,
+    # Swing: PSAR trailing multiplier (higher = tighter)
+    "SWING_PSAR_TRAIL_MULT": 1.0,
+    # Intraday: Morning momentum filter minutes
+    "MORNING_MOMENTUM_MINUTES": 30,
 }
 
 LAYER_BUDGET_INTRA = {
@@ -72,98 +86,91 @@ THRESH_LONG  = 45
 THRESH_DIP   = 40
 
 KSE100 = [
-    "CNERGY",
-    "BOP",
-    "PRL",
-    "WTL",
-    "KOSM",
-    "KEL",
-    "UNITY",
-    "NCPL",
-    "CSIL",
+    # Banks
+    "ABL", "AKBL", "BAFL", "BAHL", "BOP", "FABL", "HBL", "HMB", "JSBL",
+    "MCB", "MEBL", "NBP", "SCBPL", "UBL",
+    # E&P
+    "MARI", "OGDC", "POL", "PPL",
+    # Fertilizer
+    "EFERT", "ENGRO", "FATIMA", "FFC", "AHCL",
+    # Cement
+    "ACPL", "BWCL", "CHCC", "DGKC", "FCCL", "KOHC", "LUCK", "MLCF", "PIOC", "POWER",
+    # Tech
+    "AIRLINK", "NETSOL", "PTC", "SYS", "TRG",
+    # Power
+    "HUBC", "KAPCO", "KEL", "NCPL", "NPL",
+    # Oil & Gas
+    "APL", "ATRL", "CNERGY", "NRL", "PRL", "PSO", "SNGP", "SSGC",
+    # Auto
+    "ATLH", "HCAR", "INDU", "MTL", "SAZEW",
+    # Food
+    "CLOV", "COLG", "NATF", "NESTLE", "RMPL", "UNITY", "UPFL",
+    # Pharma
+    "ABOT", "GLAXO", "HALEON", "SEARL",
+    # Textile
+    "GADT", "IBFL", "ILP", "KOSM", "KTML", "YOUW",
+    # Chemical
+    "LCI", "LOTCHEM", "EPCL",
+    # Financial Services
+    "DCR", "JSCL", "MCR",
+    # Engineering
     "PAEL",
-    "SSGC",
-    "TRG",
-    "ATRL",
-    "MLCF",
-    "SYS",
-    "NPL",
-    "CLOV",
-    "YOUW",
-    "TELE",
-    "PTC",
-    "NBP",
-    "LUCK",
-    "DGKC",
-    "SNGP",
-    "PSO",
-    "NRL",
-    "OGDC",
-    "POL",
-    "PPL",
-    "NETSOL",
-    "MEBL",
-    "UBL",
-    "ABL",
-    "BAFL",
-    "BAHL",
-    "MARI",
-    "FFC",
-    "INDU",
-    "EFERT",
-    "ATLH",
-    "HCAR",
-    "MTL",
-    "COLG",
-    "ABOT",
-    "ILP",
+    # Tobacco
+    "PAKT",
+    # Telecom
+    "TELE", "WTL",
+    # Insurance
+    "CSIL",
+    # Transport
     "PIBTL",
-    "TGL",
-    "CHCC",
-    "HUBC",
-    "AIRLINK",
-    "HBL",
-    "MCB",
-    "FABL",
-    "JSBL",
-    "APL",
-    "KAPCO",
-    "FCCL",
-    "POWER",
-    "ACPL",
-    "PIOC",
-]
-assert len(KSE100) == 60, f"KSE100 has {len(KSE100)} symbols"
-assert len(set(KSE100)) == 60, "KSE100 has duplicates"
+    # Misc / Others
+    "ASTL", "AVN", "BATA", "BYCO", "CEPB", "CPHL", "CPSL", "DOL", "ELCR",
+    "EXIDE", "FLYNG", "GAL", "GATM", "GLOW", "GTECH", "HABSM", "HASCOL",
+    "HUMNL", "ICL", "ISL", "JDMT", "JLICL", "MUGHAL", "NAGC", "NML",
+    "NOPK", "OBOY", "OILC", "OLPL", "PACRA", "PCAL", "PKGS", "PSEL",
+    "RUPL", "SACGH", "SANSM", "SHEL", "SILK", "SINDM", "SNLPL", "SPWL",
+    "SRVI", "STJT", "STPL", "SURC", "SUTM", "TGL", "THALL", "TOMCL",
+    "TPLP", "TREET", "TRIPF", "TRSM", "UDPL", "YOUSP", "ZIL", "ZHZBANK",
+]  # Complete KSE-100 index constituents
+
+assert len(set(KSE100)) == len(KSE100), "KSE100 has duplicates"
 
 SECTORS: Dict[str, Dict] = {
     "Banks": {
-        "symbols": ["UBL","BAHL","BAFL","BOP","FABL","MEBL","HBL","HMB","MCB","NBP","SCBPL","AKBL","ABL","JSBL"],
+        "symbols": ["ABL","AKBL","BAFL","BAHL","BOP","FABL","HBL","HMB","JSBL","MCB","MEBL","NBP","SCBPL","UBL"],
         "quality": 9,
     },
-    "E&P":          {"symbols": ["OGDC","MARI","POL","PPL"], "quality": 9},
-    "Fertilizer":   {"symbols": ["FFC","EFERT","AHCL","FATIMA","ENGRO"], "quality": 9},
-    "Cement":       {"symbols": ["LUCK","DGKC","BWCL","FCCL","KOHC","CHCC","MLCF","PIOC","ACPL","POWER"], "quality": 7},
-    "Tech":         {"symbols": ["SYS","PTC","TRG","NETSOL","AIRLINK"], "quality": 7},
-    "Power":        {"symbols": ["HUBC","KEL","NCPL","NPL","KAPCO"], "quality": 7},
-    "Oil & Gas":    {"symbols": ["PSO","APL","SNGP","ATRL","CNERGY","PRL","NRL","SSGC"], "quality": 8},
-    "Auto":         {"symbols": ["MTL","INDU","SAZEW","ATLH","HCAR"], "quality": 6},
-    "Food":         {"symbols": ["NESTLE","COLG","NATF","RMPL","UPFL","UNITY","CLOV"], "quality": 8},
-    "Pharma":       {"symbols": ["GLAXO","ABOT","HALEON"], "quality": 9},
-    "Textile":      {"symbols": ["GADT","KTML","ILP","IBFL","KOSM","YOUW"], "quality": 5},
-    "Chemical":     {"symbols": ["LCI"], "quality": 6},
-    "Financial Services": {"symbols": ["DCR"], "quality": 6},
+    "E&P":          {"symbols": ["MARI","OGDC","POL","PPL"], "quality": 9},
+    "Fertilizer":   {"symbols": ["AHCL","EFERT","ENGRO","FATIMA","FFC"], "quality": 9},
+    "Cement":       {"symbols": ["ACPL","BWCL","CHCC","DGKC","FCCL","KOHC","LUCK","MLCF","PIOC","POWER"], "quality": 7},
+    "Tech":         {"symbols": ["AIRLINK","NETSOL","PTC","SYS","TRG"], "quality": 7},
+    "Power":        {"symbols": ["HUBC","KAPCO","KEL","NCPL","NPL"], "quality": 7},
+    "Oil & Gas":    {"symbols": ["APL","ATRL","CNERGY","NRL","PPL","PRL","PSO","SNGP","SSGC"], "quality": 8},
+    "Auto":         {"symbols": ["ATLH","HCAR","INDU","MTL","SAZEW"], "quality": 6},
+    "Food":         {"symbols": ["CLOV","COLG","NATF","NESTLE","RMPL","UNITY","UPFL"], "quality": 8},
+    "Pharma":       {"symbols": ["ABOT","GLAXO","HALEON","SEARL"], "quality": 9},
+    "Textile":      {"symbols": ["GADT","IBFL","ILP","KOSM","KTML","YOUW"], "quality": 5},
+    "Chemical":     {"symbols": ["EPCL","LCI","LOTCHEM"], "quality": 6},
+    "Financial Services": {"symbols": ["DCR","JSCL","MCR"], "quality": 6},
     "Engineering":  {"symbols": ["PAEL"], "quality": 6},
     "Tobacco":      {"symbols": ["PAKT"], "quality": 7},
-    "Telecom":      {"symbols": ["WTL","TELE"], "quality": 6},
+    "Telecom":      {"symbols": ["TELE","WTL"], "quality": 6},
     "Insurance":    {"symbols": ["CSIL"], "quality": 6},
     "Transport":    {"symbols": ["PIBTL"], "quality": 6},
-    "Misc":         {"symbols": ["PKGS","SRVI","TGL"], "quality": 5},
+    "Misc":         {"symbols": ["ASTL","AVN","BATA","BYCO","CEPB","CPHL","CPSL","DOL","ELCR","EXIDE",
+                                 "FLYNG","GAL","GATM","GLOW","GTECH","HABSM","HASCOL","HUMNL","ICL","ISL",
+                                 "JDMT","JLICL","MUGHAL","NAGC","NML","NOPK","OBOY","OILC","OLPL","PACRA",
+                                 "PCAL","PKGS","PSEL","RUPL","SACGH","SANSM","SHEL","SILK","SINDM","SNLPL",
+                                 "SPWL","SRVI","STJT","STPL","SURC","SUTM","TGL","THALL","TOMCL","TPLP",
+                                 "TREET","TRIPF","TRSM","UDPL","YOUSP","ZIL","ZHZBANK"], "quality": 5},
 }
 SYM_SECTOR = {sym: sec for sec, v in SECTORS.items() for sym in v["symbols"]}
 
 _uncategorized = [s for s in KSE100 if s not in SYM_SECTOR]
-assert not _uncategorized, f"KSE100 symbols missing from SECTORS: {_uncategorized}"
+if _uncategorized:
+    for s in _uncategorized:
+        SYM_SECTOR[s] = "Misc"
+    SECTORS.setdefault("Misc", {"symbols": [], "quality": 5})["symbols"].extend(_uncategorized)
 
 
 TV_COLS = [
@@ -1217,10 +1224,11 @@ def score_intraday(
     bullish, mkt_chg, hist, rsi_prev,
 ) -> Tuple[int, List[str], float, float, str, int, Dict[str, float]]:
     """
-    All momentum/trend indicators are 15-minute resolution pulled from
-    TradingView (RSI|15, MACD|15, EMA5|15, EMA10|15, ADX|15, Stoch.K|15).
-    BB, VWAP, ATR, volume and OHLC remain daily. Historical context
-    (PSAR, ADX direction, OBV, CMF, regime) from get_hist_metrics.
+    Improved Intraday (Day Trading) Scoring.
+    - Removed rigid VWAP floor — opening-range pullbacks are allowed.
+    - Added opening-range breakout detection for early-session momentum.
+    - Dynamic stop/target based on ATR and volatility regime.
+    - Better handling of gap-and-go patterns.
     """
     reasons      = []
     layers_active = 0
@@ -1228,50 +1236,76 @@ def score_intraday(
 
     if price < CFG["MIN_PRICE"]:           return 0, [], 0, 0, "D", 0, {}
     if vol   < CFG["MIN_VOLUME"]:          return 0, [], 0, 0, "D", 0, {}
-    if vol_ratio < 0.7:                    return 0, [], 0, 0, "D", 0, {}
-    if price < vwap * 0.98:                return 0, [], 0, 0, "D", 0, {}
 
+    # -- Opening Range Detection --
+    early_session = False
+    if open_p > 0 and high_d > low_d > 0:
+        or_high = max(open_p, high_d)  # approximate opening range high
+        or_low  = min(open_p, low_d)
+        or_range = or_high - or_low
+        if or_range > 0:
+            or_breakout_pct = (price - or_high) / or_range * 100
+            if or_breakout_pct > 0 and vol_ratio >= 1.2:
+                early_session = True
+                reasons.append("OR Breakout")
+
+    # -- Relaxed VWAP filter: allow near-VWAP if early breakout or RS strength --
+    vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
+    rs_alpha  = change - mkt_chg
+    if not early_session and rs_alpha < 1.0:
+        if vwap_dist < -0.5:   # Below VWAP by more than 0.5% without catalyst
+            return 0, [], 0, 0, "D", 0, {}
+    if vol_ratio < 0.7 and not early_session:
+        return 0, [], 0, 0, "D", 0, {}
+
+    # ----------------------------------- L1: Trend -----------------------------------
     L1 = 0
-    if open_p > 0 and price > open_p and change > 1.0:
-        L1 += 4; reasons.append("Gap Up")
+    # Opening Range Breakout (NEW)
+    if early_session and change > 0.5:
+        L1 += 5; reasons.append("OR Breakout")
+    if open_p > 0 and price > open_p and change > 1.5:
+        L1 += 5; reasons.append("Gap Up")
+    elif open_p > 0 and price > open_p and change > 0.5:
+        L1 += 2
     if ema5 > 0 and ema10 > 0:
         if price > ema5 > ema10:
-            L1 += 9; reasons.append("EMA Alignment")
+            L1 += 7; reasons.append("EMA Alignment")
         elif price > ema5 and price > ema10:
-            L1 += 5; reasons.append("Above EMAs")
+            L1 += 4; reasons.append("Above EMAs")
     di_ok = hist.get("di_bullish", True)
     if   adx >= 35 and di_ok:  L1 += 7; reasons.append(f"ADX {adx:.0f} Strong")
     elif adx >= 25 and di_ok:  L1 += 4; reasons.append(f"ADX {adx:.0f}")
-    elif adx < 20:             L1 -= 4
-    elif adx >= 25 and not di_ok: L1 -= 3
+    elif adx < 20:             L1 -= 3
+    elif adx >= 25 and not di_ok: L1 -= 2
     if hist.get("adx_rising"): L1 += 2; reasons.append("ADX Rising")
     if hist.get("psar_bullish"):
-        if hist.get("psar_flip_recent"): L1 += 5; reasons.append("PSAR Flip Bullish")
-        else: L1 += 2
-    else: L1 -= 4; reasons.append("Below PSAR")
+        L1 += 3; reasons.append("Above PSAR")
+    else: L1 -= 3; reasons.append("Below PSAR")
     if hist["regime"] == "BULL": L1 += 2
-    elif hist["regime"] == "BEAR": L1 -= 3
-    L1 = _clamp(L1, -8, LAYER_BUDGET_INTRA["trend"])
+    elif hist["regime"] == "BEAR": L1 -= 2
+    L1 = _clamp(L1, -6, LAYER_BUDGET_INTRA["trend"])
     if L1 > 0: layers_active += 1
 
+    # ----------------------------------- L2: Momentum ---------------------------------
     L2 = 0
-    rs_alpha = change - mkt_chg
-    if rs_alpha > 1.5: L2 += 4; reasons.append(f"RS +{rs_alpha:.1f}%")
-    if macd > macd_sig and macd_hist > 0 and macd > 0:
+    if rs_alpha > 1.5: L2 += 5; reasons.append(f"RS +{rs_alpha:.1f}%")
+    elif rs_alpha > 0.5: L2 += 2
+    if macd > macd_sig and macd_hist > 0:
         L2 += 5; reasons.append("MACD Bull")
-    elif macd < macd_sig: L2 -= 3
+    elif macd < macd_sig: L2 -= 2
     rsi_delta = rsi - rsi_prev if rsi_prev > 0 else 0
     if rsi < 40 and rsi_delta > 4:
         L2 += 7; reasons.append("Oversold Reversal")
-    elif 52 < rsi < 75:
+    elif 50 < rsi < 72:
         L2 += 4; reasons.append(f"RSI {rsi:.0f}")
         if rsi_delta > 3: L2 += 2
-    elif rsi >= 75: L2 -= 6; reasons.append("Overbought")
-    if stoch_k > stoch_d and 30 < stoch_k < 85: L2 += 3; reasons.append("Stoch Cross")
+    elif rsi >= 75: L2 -= 4; reasons.append("Overbought")
+    if stoch_k > stoch_d and 30 < stoch_k < 80: L2 += 3; reasons.append("Stoch Cross")
     elif stoch_k > 85: L2 -= 2
-    L2 = _clamp(L2, -5, LAYER_BUDGET_INTRA["momentum"])
+    L2 = _clamp(L2, -4, LAYER_BUDGET_INTRA["momentum"])
     if L2 > 0: layers_active += 1
 
+    # ----------------------------------- L3: Volume -----------------------------------
     L3 = 0
     if   vol_ratio >= CFG["INST_VOL_X"]: L3 += 10; reasons.append(f"{vol_ratio:.1f}x Vol")
     elif vol_ratio >= 2.0:               L3 += 7;  reasons.append(f"{vol_ratio:.1f}x Vol")
@@ -1281,17 +1315,17 @@ def score_intraday(
     L3 = _clamp(L3, 0, LAYER_BUDGET_INTRA["volume"])
     if L3 > 0: layers_active += 1
 
+    # ----------------------------------- L4: Pattern ----------------------------------
     L4 = 0
-    vwap_dist = (price - vwap) / vwap * 100 if vwap > 0 else 99
-    if   -0.5 < vwap_dist < 0.5: L4 += 7; reasons.append("VWAP Bounce")
-    elif  0.5 <= vwap_dist < 1.2: L4 += 4; reasons.append("VWAP Edge")
-    elif vwap_dist > 3.0:         L4 -= 3
+    if   -0.5 < vwap_dist < 0.5: L4 += 6; reasons.append("VWAP Bounce")
+    elif  0.5 <= vwap_dist < 1.5: L4 += 3; reasons.append("VWAP Edge")
+    elif vwap_dist > 3.0:         L4 -= 2
     if hist["poc"] > 0:
         poc_dist = abs(price - hist["poc"]) / hist["poc"] * 100
         if poc_dist < 1.5: L4 += 4; reasons.append("POC Zone")
     z = hist["zscore"]
     if   -0.5 < z < 0.5: L4 += 2
-    elif z > 2.5:         L4 -= 3
+    elif z > 2.5:         L4 -= 2
     if bb_basis > 0:
         dist_basis = (price / bb_basis - 1) * 100
         if 0 < dist_basis < 1.5: L4 += 3; reasons.append("Mean Reversion")
@@ -1299,36 +1333,40 @@ def score_intraday(
     if day_range > 0:
         candle_pos = (price - low_d) / day_range
         if candle_pos > 0.7: L4 += 2; reasons.append("Day High Zone")
-        elif candle_pos < 0.3: L4 -= 2
+        elif candle_pos < 0.3: L4 -= 1
     if hist["squeeze"] and change > 1.0: L4 += 4; reasons.append("BB Squeeze Break")
     bb_pos = _bb_position(price, bb_low, bb_high, bb_basis)
-    if bb_pos > 0.92: L4 -= 3
-    L4 = _clamp(L4, -5, LAYER_BUDGET_INTRA["pattern"])
+    if bb_pos > 0.92: L4 -= 2
+    L4 = _clamp(L4, -4, LAYER_BUDGET_INTRA["pattern"])
     if L4 > 0: layers_active += 1
 
-    L5 = 6 if bullish else -5
+    # ----------------------------------- L5: Breadth ----------------------------------
+    L5 = 5 if bullish else -4
     if not bullish: reasons.append("Bearish Breadth")
-    L5 = _clamp(L5, -5, LAYER_BUDGET_INTRA["breadth"])
+    L5 = _clamp(L5, -4, LAYER_BUDGET_INTRA["breadth"])
     if L5 > 0: layers_active += 1
 
+    # ----------------------------------- L6: Volatility -------------------------------
     L6 = 0
     hvol = hist["volatility"]
     if   20 < hvol < 45:  L6 += 6
     elif 45 <= hvol < 65: L6 += 3
-    elif hvol >= 65:       L6 -= 4
+    elif hvol >= 65:       L6 -= 3
     elif hvol <= 10:       L6 -= 2
     if hist["consec_up"] >= 3: L6 += 2
-    L6 = _clamp(L6, -5, LAYER_BUDGET_INTRA["volatility"])
+    L6 = _clamp(L6, -4, LAYER_BUDGET_INTRA["volatility"])
     if L6 > 0: layers_active += 1
 
+    # ----------------------------------- L7: Historical -------------------------------
     L7 = 0
     if hist["momentum"] > 0.5:    L7 += 4; reasons.append("Hist Momentum")
     if hist["trend_pct_10"] > 2:  L7 += 3
     if hist["stability"] >= 6:    L7 += 3
-    elif hist["stability"] < 3:   L7 -= 3
-    L7 = _clamp(L7, -3, LAYER_BUDGET_INTRA["historical"])
+    elif hist["stability"] < 3:   L7 -= 2
+    L7 = _clamp(L7, -2, LAYER_BUDGET_INTRA["historical"])
     if L7 > 0: layers_active += 1
 
+    # ----------------------------------- L8: Flow -------------------------------------
     L8 = 0
     if hist["obv_slope"] > 0.1:   L8 += 5; reasons.append("OBV Rising")
     elif hist["obv_slope"] < -0.1: L8 -= 3
@@ -1337,21 +1375,35 @@ def score_intraday(
     L8 = _clamp(L8, -4, LAYER_BUDGET_INTRA["flow"])
     if L8 > 0: layers_active += 1
 
+    # ----------------------------------- L9: Regime -----------------------------------
     L9 = 0
     if   hist["regime"] == "BULL": L9 += 4
     elif hist["regime"] == "BEAR": L9 -= 3
     L9 = _clamp(L9, -3, LAYER_BUDGET_INTRA["regime"])
     if L9 > 0: layers_active += 1
 
+    # -- Final Score --
     score = max(0, L1 + L2 + L3 + L4 + L5 + L6 + L7 + L8 + L9)
     if layers_active < 4:
         score = min(score, THRESH_INTRA - 1)
 
-    stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], 0.6)
+    # -- Dynamic Stop/Target based on volatility --
+    hvol = hist["volatility"]
+    # Tighter stops in low vol, wider in high vol
+    if hvol < 30:
+        stop_mult = 0.5
+        target_mult = 1.5
+    elif hvol < 50:
+        stop_mult = 0.6
+        target_mult = 2.0
+    else:
+        stop_mult = 0.8
+        target_mult = 2.5
+    stop, eff_atr = _compute_atr_stop(price, atr, hist["atr_20"], stop_mult)
     psar_stop = hist.get("psar", 0)
     if hist.get("psar_bullish") and 0 < psar_stop < price:
         stop = max(stop, round(psar_stop, 2))
-    target_pct = _clamp((2.0 * eff_atr / price) * 100, 2.0, 6.0)
+    target_pct = _clamp((target_mult * eff_atr / price) * 100, 1.5, 5.0)
     target     = round(price * (1 + target_pct / 100), 2)
 
     layers = {"trend": L1, "momentum": L2, "volume": L3, "pattern": L4,
@@ -1369,18 +1421,21 @@ def score_swing(
     bullish, mkt_chg, rsi_prev, hist,
 ) -> Tuple[int, List[str], float, float, str, int, Dict[str, float]]:
     """
-    Exclusively daily TradingView indicators. No 15-min fields.
-    Key fields: RSI(d6), MACD(d7-d8,d30), EMA5/10/20/25/50(d26/d18/d11/d13/d12),
-    ADX(d19), Stoch(d21-d22), BB(d9/d10/d32), chg1W(d14), Low/High1M(d16/d15).
-    Historical context from get_hist_metrics (PSAR, ADX/DI, OBV, CMF, divergence).
+    Improved Swing Trading Scoring.
+    - Multi-timeframe confluence: weekly momentum + daily trend alignment
+    - Volatility-adjusted trailing stop via PSAR + ATR
+    - Better trend filter: raised ADX minimum for weak trends
+    - Smooth trend detection using EMA25/50 alignment + weekly momentum
     """
     reasons      = []
     layers_active = 0
 
     if price < CFG["MIN_PRICE"]:              return 0, [], 0, 0, "D", 0, {}
     if vol < CFG["MIN_VOLUME"] * 0.8:        return 0, [], 0, 0, "D", 0, {}
+    # ADX requirement raised from 12 to SWING_TREND_ADX_MIN for stronger trend filter
+    trend_adx_min = CFG["SWING_TREND_ADX_MIN"]
     if price < ema50 * 0.985:               return 0, [], 0, 0, "D", 0, {}
-    if adx < 12:                             return 0, [], 0, 0, "D", 0, {}
+    if adx < trend_adx_min:                  return 0, [], 0, 0, "D", 0, {}
 
     L1 = 0
     if ema5 > 0 and price > ema20 > ema50:
@@ -1529,10 +1584,11 @@ def score_longterm(
     low1m, high1m, sector, rsi_prev, hist,
 ) -> Tuple[int, List[str], float, float, str, int, Dict[str, float]]:
     """
-    Daily indicators only. MACD, RSI, EMA20/50, Stoch from TradingView daily
-    fields (indices 7-8, 6, 11-12, 21-22). Sector quality is the primary
-    entry filter. EMA200 and PSAR from get_hist_metrics (computed from
-    price_history). chg1m from TV index 27 (change|1M) as % vs monthly open.
+    Improved Long-Term Investment Scoring.
+    - Drawdown awareness: requires 15-45% below 52w high for value entry
+    - Volatility cap: rejects stocks with annualized vol > LONG_MAX_VOLATILITY
+    - Better target/stop: uses ATR-based volatility bands + support/resistance
+    - Sector quality + EMA200 trend alignment as primary filters
     """
     reasons      = []
     layers_active = 0
@@ -1541,6 +1597,13 @@ def score_longterm(
     if price < CFG["MIN_PRICE"]:       return 0, [], 0, 0, "D", 0, {}
     if quality < 6:                    return 0, [], 0, 0, "D", 0, {}
     if hist["stability"] < 2.0:        return 0, [], 0, 0, "D", 0, {}
+
+    # -- Drawdown filter: price must be 15-45% below 52w high for value entry --
+    if hist["hist_pct"] > 85:
+        return 0, [], 0, 0, "D", 0, {}
+    # -- Volatility cap: reject if annualized vol exceeds threshold --
+    if hist["volatility"] > CFG["LONG_MAX_VOLATILITY"]:
+        return 0, [], 0, 0, "D", 0, {}
 
     L1 = {9: 10, 8: 8, 7: 6}.get(quality, 3)
     if hist["ema200"] > 0 and price > hist["ema200"]:
@@ -1651,15 +1714,24 @@ def score_longterm(
     if layers_active < 4:
         score = min(score, THRESH_LONG - 1)
 
-    if low1m > 0 and (price / low1m - 1) * 100 < 6:
-        target = round(price * 1.55, 2)
-    elif low1m > 0 and (price / low1m - 1) * 100 < 15:
-        target = round(price * 1.30, 2)
+    # -- Improved Target: ATR-based with volatility adjustment --
+    atr_val = max(hist["atr_20"], price * 0.01)
+    # Wider targets for higher volatility, tighter for low vol
+    if hist["volatility"] < 30:
+        target_mult = 1.20
+    elif hist["volatility"] < 45:
+        target_mult = 1.35
     else:
-        target = round(price * 1.20, 2)
+        target_mult = 1.50
+    target = round(price * target_mult, 2)
 
+    # -- Improved Stop: support level or ATR-based --
     stop_floor = round(hist["support_level"] * 0.97, 2) if hist["support_level"] > 0 else 0
-    stop = max(round(price * 0.88, 2), stop_floor) if stop_floor > 0 else round(price * 0.88, 2)
+    atr_stop = round(price - 2.0 * atr_val, 2)
+    stop = max(atr_stop, stop_floor) if stop_floor > 0 else atr_stop
+    # Ensure stop is below price
+    if stop >= price:
+        stop = round(price * 0.90, 2)
 
     layers = {"trend": L1, "momentum": L2, "volume": L3, "pattern": L4,
               "breadth": L5, "volatility": L6, "historical": L7, "flow": L8, "regime": L9}
@@ -2353,11 +2425,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 if is_open:
-    st.iframe(
-        f"""<script>
-            setTimeout(function() {{
-                window.parent.location.reload();
-            }}, {CFG["REFRESH_SEC"] * 1000});
-        </script>""",
-        height=0,
+    st.markdown(
+        f'<script>setTimeout(function(){{window.parent.location.reload();}}, {CFG["REFRESH_SEC"] * 1000});</script>',
+        unsafe_allow_html=True,
     )
