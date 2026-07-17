@@ -124,7 +124,11 @@ KSE100 = [
     # Transport
     "PIBTL",
     # Misc / Others
-    "ASTL", "AVN", "BATA", "BYCO", "CEPB", "CPHL", "CPSL", "DOL", "ELCR",
+    # Note: BYCO (Byco Petroleum) was renamed to CNERGY (Cnergyico PK Ltd) in
+    # Dec 2021 and is already listed under Oil & Gas as "CNERGY" above —
+    # keeping "BYCO" here was a stale duplicate that can never resolve on
+    # Yahoo Finance, so it has been removed.
+    "ASTL", "AVN", "BATA", "CEPB", "CPHL", "CPSL", "DOL", "ELCR",
     "EXIDE", "FLYNG", "GAL", "GATM", "GLOW", "GTECH", "HABSM", "HASCOL",
     "HUMNL", "ICL", "ISL", "JDMT", "JLICL", "MUGHAL", "NAGC", "NML",
     "NOPK", "OBOY", "OILC", "OLPL", "PACRA", "PCAL", "PKGS", "PSEL",
@@ -145,7 +149,7 @@ SECTORS: Dict[str, Dict] = {
     "Cement":       {"symbols": ["ACPL","BWCL","CHCC","DGKC","FCCL","KOHC","LUCK","MLCF","PIOC","POWER"], "quality": 7},
     "Tech":         {"symbols": ["AIRLINK","NETSOL","PTC","SYS","TRG"], "quality": 7},
     "Power":        {"symbols": ["HUBC","KAPCO","KEL","NCPL","NPL"], "quality": 7},
-    "Oil & Gas":    {"symbols": ["APL","ATRL","CNERGY","NRL","PPL","PRL","PSO","SNGP","SSGC"], "quality": 8},
+    "Oil & Gas":    {"symbols": ["APL","ATRL","CNERGY","NRL","PRL","PSO","SNGP","SSGC"], "quality": 8},
     "Auto":         {"symbols": ["ATLH","HCAR","INDU","MTL","SAZEW"], "quality": 6},
     "Food":         {"symbols": ["CLOV","COLG","NATF","NESTLE","RMPL","UNITY","UPFL"], "quality": 8},
     "Pharma":       {"symbols": ["ABOT","GLAXO","HALEON","SEARL"], "quality": 9},
@@ -157,7 +161,7 @@ SECTORS: Dict[str, Dict] = {
     "Telecom":      {"symbols": ["TELE","WTL"], "quality": 6},
     "Insurance":    {"symbols": ["CSIL"], "quality": 6},
     "Transport":    {"symbols": ["PIBTL"], "quality": 6},
-    "Misc":         {"symbols": ["ASTL","AVN","BATA","BYCO","CEPB","CPHL","CPSL","DOL","ELCR","EXIDE",
+    "Misc":         {"symbols": ["ASTL","AVN","BATA","CEPB","CPHL","CPSL","DOL","ELCR","EXIDE",
                                  "FLYNG","GAL","GATM","GLOW","GTECH","HABSM","HASCOL","HUMNL","ICL","ISL",
                                  "JDMT","JLICL","MUGHAL","NAGC","NML","NOPK","OBOY","OILC","OLPL","PACRA",
                                  "PCAL","PKGS","PSEL","RUPL","SACGH","SANSM","SHEL","SILK","SINDM","SNLPL",
@@ -283,6 +287,13 @@ def init_db():
                     ON signal_log(symbol, strategy, first_seen);
                 CREATE INDEX IF NOT EXISTS idx_signal_status
                     ON signal_log(symbol, strategy, status);
+
+                CREATE TABLE IF NOT EXISTS bad_symbols (
+                    symbol         TEXT PRIMARY KEY,
+                    fail_count     INTEGER DEFAULT 0,
+                    last_fail_date TEXT,
+                    quarantined    INTEGER DEFAULT 0
+                );
             """)
             cursor = conn.cursor()
             cursor.execute("PRAGMA table_info(daily_snapshot)")
@@ -306,88 +317,157 @@ def _symbols_in_db() -> set:
         conn.close()
 
 
-def sync_historical_data(symbols: List[str], force: bool = False):
-    """
-    Batch-download OHLCV from Yahoo Finance.
-    When force=False (default) only downloads symbols not already in the DB,
-    making the cold-start bootstrap fast on subsequent deployments.
-    """
-    if not force:
-        have = _symbols_in_db()
-        symbols = [s for s in symbols if s not in have]
-    if not symbols:
-        st.caption("Historical data already up to date.")
+QUARANTINE_AFTER_FAILS = 3   # consecutive sync failures before a symbol is auto-excluded
+DOWNLOAD_CHUNK_SIZE    = 40  # tickers per yf.download batch (avoids Yahoo rate-limit false-failures)
+
+
+def get_quarantined_symbols() -> set:
+    """Symbols that have failed to download QUARANTINE_AFTER_FAILS times in a row.
+    These are almost always delisted / renamed / mistyped tickers rather than
+    transient network issues, so we stop retrying them on every sync."""
+    conn = sqlite3.connect(CFG["DB_PATH"])
+    try:
+        cur = conn.cursor()
+        cur.execute("SELECT symbol FROM bad_symbols WHERE quarantined = 1")
+        return {row[0] for row in cur.fetchall()}
+    finally:
+        conn.close()
+
+
+def _record_symbol_result(conn: sqlite3.Connection, sym: str, success: bool, today: str):
+    if success:
+        conn.execute("DELETE FROM bad_symbols WHERE symbol = ?", (sym,))
         return
+    cur = conn.execute("SELECT fail_count FROM bad_symbols WHERE symbol = ?", (sym,))
+    row = cur.fetchone()
+    fail_count = (row[0] if row else 0) + 1
+    quarantined = 1 if fail_count >= QUARANTINE_AFTER_FAILS else 0
+    conn.execute(
+        "INSERT OR REPLACE INTO bad_symbols (symbol, fail_count, last_fail_date, quarantined) "
+        "VALUES (?, ?, ?, ?)",
+        (sym, fail_count, today, quarantined),
+    )
 
-    end   = datetime.now()
-    start = end - timedelta(days=CFG["HIST_DAYS"] + 30)
-    tickers = [f"{s}.KA" for s in symbols]
 
-    ph = st.empty()
-    ph.caption(f"Fetching {CFG['HIST_DAYS']}-day history for {len(symbols)} symbol(s)…")
-
+def _download_chunk(tickers: List[str], start, end) -> Optional[pd.DataFrame]:
     try:
         df = yf.download(
             tickers, start=start, end=end,
             group_by="ticker", progress=False, auto_adjust=True,
             threads=True,
         )
-    except Exception as e:
-        ph.error(f"Yahoo download failed: {e}")
-        return
+    except Exception:
+        return None
+    return df if df is not None and not df.empty else None
 
-    if df is None or df.empty:
-        ph.error("Yahoo returned no data (rate-limited or unreachable). Try SYNC again shortly.")
-        return
 
+def _extract_ticker_df(df: pd.DataFrame, sym: str, single: bool) -> pd.DataFrame:
+    key = f"{sym}.KA"
     has_ticker_level = isinstance(df.columns, pd.MultiIndex)
+    if has_ticker_level:
+        if key not in df.columns.get_level_values(0):
+            return pd.DataFrame()
+        return df[key].dropna().reset_index()
+    if single:
+        return df.dropna().reset_index()
+    return pd.DataFrame()
 
+
+def _rows_from_ticker_df(ticker_df: pd.DataFrame, sym: str) -> list:
+    rows = []
+    for _, r in ticker_df.iterrows():
+        try:
+            rows.append((
+                r["Date"].strftime("%Y-%m-%d"), sym,
+                float(r["Open"]), float(r["High"]),
+                float(r["Low"]),  float(r["Close"]),
+                int(r["Volume"]),
+            ))
+        except Exception:
+            continue
+    return rows
+
+
+def sync_historical_data(symbols: List[str], force: bool = False):
+    """
+    Batch-download OHLCV from Yahoo Finance.
+    When force=False (default) only downloads symbols not already in the DB,
+    making the cold-start bootstrap fast on subsequent deployments.
+
+    Symbols are downloaded in chunks (large single-batch requests are what
+    make Yahoo silently drop some tickers). Any ticker missing after the
+    batch pass is retried once on its own — this separates genuine
+    rate-limit/network flukes from tickers that are actually gone (delisted,
+    renamed, mistyped). Tickers that keep failing across repeated syncs are
+    quarantined in the `bad_symbols` table and skipped automatically from
+    then on, so they stop showing up as "failed" every single run.
+    """
+    quarantined = get_quarantined_symbols()
+    if not force:
+        have = _symbols_in_db()
+        symbols = [s for s in symbols if s not in have]
+    symbols = [s for s in symbols if s not in quarantined]
+
+    if not symbols:
+        st.caption("Historical data already up to date.")
+        return
+
+    end   = datetime.now()
+    start = end - timedelta(days=CFG["HIST_DAYS"] + 30)
+
+    ph = st.empty()
+    ph.caption(f"Fetching {CFG['HIST_DAYS']}-day history for {len(symbols)} symbol(s)…")
+
+    saved, failed = 0, []
     conn = sqlite3.connect(CFG["DB_PATH"], timeout=30)
-    saved = 0
-    failed = []
+    today = datetime.now().strftime("%Y-%m-%d")
     try:
-        for sym in symbols:
-            try:
-                key = f"{sym}.KA"
-                if has_ticker_level:
-                    if key not in df.columns.get_level_values(0):
-                        failed.append(sym)
-                        continue
-                    ticker_df = df[key].dropna().reset_index()
-                elif len(symbols) == 1:
-                    ticker_df = df.dropna().reset_index()
-                else:
-                    failed.append(sym)
-                    continue
-                if ticker_df.empty:
-                    failed.append(sym)
-                    continue
-                rows = []
-                for _, r in ticker_df.iterrows():
-                    try:
-                        rows.append((
-                            r["Date"].strftime("%Y-%m-%d"), sym,
-                            float(r["Open"]), float(r["High"]),
-                            float(r["Low"]),  float(r["Close"]),
-                            int(r["Volume"]),
-                        ))
-                    except Exception:
-                        continue
+        chunks = [symbols[i:i + DOWNLOAD_CHUNK_SIZE] for i in range(0, len(symbols), DOWNLOAD_CHUNK_SIZE)]
+        for chunk in chunks:
+            tickers = [f"{s}.KA" for s in chunk]
+            df = _download_chunk(tickers, start, end)
+            chunk_failed = []
+            for sym in chunk:
+                ticker_df = _extract_ticker_df(df, sym, single=len(chunk) == 1) if df is not None else pd.DataFrame()
+                rows = _rows_from_ticker_df(ticker_df, sym) if not ticker_df.empty else []
                 if not rows:
-                    failed.append(sym)
+                    chunk_failed.append(sym)
                     continue
                 with conn:
                     conn.executemany(
                         "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
                     )
                 saved += 1
-            except Exception:
-                failed.append(sym)
+                _record_symbol_result(conn, sym, success=True, today=today)
+
+            # Retry each chunk-failure individually once — a batch failure is
+            # often Yahoo throttling the whole request, not the ticker itself.
+            for sym in chunk_failed:
+                single_df = _download_chunk([f"{sym}.KA"], start, end)
+                ticker_df = _extract_ticker_df(single_df, sym, single=True) if single_df is not None else pd.DataFrame()
+                rows = _rows_from_ticker_df(ticker_df, sym) if not ticker_df.empty else []
+                if rows:
+                    with conn:
+                        conn.executemany(
+                            "INSERT OR REPLACE INTO price_history VALUES (?,?,?,?,?,?,?)", rows
+                        )
+                    saved += 1
+                    _record_symbol_result(conn, sym, success=True, today=today)
+                else:
+                    failed.append(sym)
+                    _record_symbol_result(conn, sym, success=False, today=today)
+        conn.commit()
     finally:
         conn.close()
+        newly_quarantined = get_quarantined_symbols() & set(failed)
         msg = f"Synced {saved}/{len(symbols)} symbols — {CFG['HIST_DAYS']}-day history loaded."
         if failed:
             msg += f"  ⚠️ {len(failed)} failed: {', '.join(failed[:8])}{'…' if len(failed) > 8 else ''}"
+        if newly_quarantined:
+            msg += (f"  🚫 {len(newly_quarantined)} now quarantined after "
+                    f"{QUARANTINE_AFTER_FAILS} consecutive failures and will be "
+                    f"skipped on future syncs: {', '.join(sorted(newly_quarantined))}. "
+                    f"Verify these tickers on Yahoo Finance / PSX for a rename or delisting.")
         ph.caption(msg)
 
 
